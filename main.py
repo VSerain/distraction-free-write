@@ -33,8 +33,18 @@ def _save_settings():
 def _apply_theme(stdscr):
     if not curses.has_colors():
         return
-    if _settings.get("theme") == "light":
+    theme = _settings.get("theme", "dark")
+    if theme == "light":
         curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
+        stdscr.bkgd(" ", curses.color_pair(1))
+    elif theme == "sepia":
+        # Fond crème chaud + texte brun-gris doux → réduction fatigue visuelle
+        if curses.can_change_color() and curses.COLORS >= 16:
+            curses.init_color(8, 973, 941, 863)   # #F8F0DC — parchemin chaud
+            curses.init_color(9, 239, 208, 188)   # #3D3530 — brun-gris doux
+            curses.init_pair(1, 9, 8)
+        else:
+            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_YELLOW)
         stdscr.bkgd(" ", curses.color_pair(1))
     else:
         curses.init_pair(1, -1, -1)
@@ -80,14 +90,34 @@ def _read_wifi_ssid() -> str:
     return ""
 
 
+def _is_wifi_connected() -> bool:
+    return bool(_read_wifi_ssid())
+
+
+def _wifi_set_radio(on: bool):
+    if not shutil.which("nmcli"):
+        return
+    try:
+        subprocess.run(
+            ["nmcli", "radio", "wifi", "on" if on else "off"],
+            capture_output=True, timeout=5,
+        )
+        _sys_cache["ts"] = 0.0
+    except Exception:
+        pass
+
+
 def _refresh_sys_status():
     now = time.time()
     if now - _sys_cache["ts"] < 10:
         return
     _sys_cache["ts"] = now
-    _sys_cache["bat"]  = _read_battery()
-    ssid = _read_wifi_ssid()
-    _sys_cache["wifi"] = f"WiFi:{ssid}" if ssid else "WiFi:--"
+    _sys_cache["bat"] = _read_battery()
+    if _settings.get("wifi_off", False):
+        _sys_cache["wifi"] = "WiFi:OFF"
+    else:
+        ssid = _read_wifi_ssid()
+        _sys_cache["wifi"] = f"WiFi:{ssid}" if ssid else "WiFi:--"
 
 
 # ── utilitaires écran ────────────────────────────────────────────────────────
@@ -154,6 +184,27 @@ def file_preview(path: Path, max_lines: int = 40) -> list[str]:
         return ["(impossible à lire)"]
 
 
+def _format_age(path: Path) -> str:
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age < 60:      return "<1m"
+        if age < 3600:    return f"{int(age / 60)}m"
+        if age < 86400:   return f"{int(age / 3600)}h"
+        return f"{int(age / 86400)}j"
+    except OSError:
+        return ""
+
+
+def _format_size(path: Path) -> str:
+    try:
+        sz = path.stat().st_size
+        if sz < 1024:         return f"{sz}o"
+        if sz < 1024 * 1024:  return f"{sz // 1024}Ko"
+        return f"{sz // (1024 * 1024)}Mo"
+    except OSError:
+        return ""
+
+
 def draw_panel(stdscr, items: list[Path], sel: int):
     """Liste à gauche, prévisualisation à droite, séparées par une ligne verticale."""
     h, w = stdscr.getmaxyx()
@@ -185,7 +236,12 @@ def draw_panel(stdscr, items: list[Path], sel: int):
             is_sel = (i == sel)
             prefix = " ▶ " if is_sel else "   "
             name = item.name + "/" if item.is_dir() else item.name
-            line = (prefix + name)[:left_w]
+            if not item.is_dir() and left_w >= 22:
+                meta  = f" {_format_age(item)}·{_format_size(item)}"
+                avail = left_w - len(prefix) - len(meta)
+                line  = (prefix + name[:avail].ljust(avail) + meta) if avail > 2 else (prefix + name)[:left_w]
+            else:
+                line = (prefix + name)[:left_w]
             try:
                 if is_sel:
                     stdscr.attron(curses.A_REVERSE)
@@ -278,14 +334,72 @@ def confirm(stdscr, question: str) -> bool:
                 return False
 
 
+# Séquences d'échappement non reconnues automatiquement par curses.
+# Utilisées comme fallback quand get_wch() renvoie '\033' seul.
+_ESC_MAP: dict[str, int] = {
+    # Flèches (xterm / vt100 / rxvt)
+    "\033[A": curses.KEY_UP,    "\033OA": curses.KEY_UP,
+    "\033[B": curses.KEY_DOWN,  "\033OB": curses.KEY_DOWN,
+    "\033[C": curses.KEY_RIGHT, "\033OC": curses.KEY_RIGHT,
+    "\033[D": curses.KEY_LEFT,  "\033OD": curses.KEY_LEFT,
+    # Home / End
+    "\033[H": curses.KEY_HOME,  "\033OH": curses.KEY_HOME,
+    "\033[1~": curses.KEY_HOME, "\033[7~": curses.KEY_HOME,
+    "\033[F": curses.KEY_END,   "\033OF": curses.KEY_END,
+    "\033[4~": curses.KEY_END,  "\033[8~": curses.KEY_END,
+    # Page Up / Down
+    "\033[5~": curses.KEY_PPAGE,
+    "\033[6~": curses.KEY_NPAGE,
+    # Suppr (delete forward)
+    "\033[3~": curses.KEY_DC,
+    # Shift + flèches
+    "\033[1;2C": curses.KEY_SRIGHT, "\033[2C": curses.KEY_SRIGHT,
+    "\033[1;2D": curses.KEY_SLEFT,  "\033[2D": curses.KEY_SLEFT,
+    # Ctrl + ← / →  (Linux / xterm / iTerm2)
+    "\033[1;5D": 546, "\033[5D": 546,
+    "\033[1;5C": 561, "\033[5C": 561,
+    # Ctrl+Shift + ← / →  (Linux / xterm / iTerm2)
+    "\033[1;6D": 580,
+    "\033[1;6C": 595,
+    # Mac Option + ← / →  (Terminal.app)
+    "\033b": 546,
+    "\033f": 561,
+    # Mac Option+Shift + ← / →  (Terminal.app)
+    "\033[1;4D": 580,
+    "\033[1;4C": 595,
+}
+
+
 def next_key(stdscr):
-    """Lit une touche. Retourne (char_str | None, keycode_int | None)."""
+    """Lit une touche. Retourne (char_str | None, keycode_int | None).
+    Quand curses renvoie '\\033' seul (séquence non reconnue), on lit la
+    suite manuellement avec un court timeout et on consulte _ESC_MAP."""
     try:
         key = stdscr.get_wch()
     except curses.error:
         return None, None
+
     if isinstance(key, str):
+        if key == "\033":
+            # Lire la suite de la séquence (octets déjà dans le buffer)
+            stdscr.timeout(50)
+            seq = "\033"
+            while len(seq) < 12:
+                try:
+                    c = stdscr.get_wch()
+                    if isinstance(c, str):
+                        seq += c
+                    else:
+                        break
+                except curses.error:
+                    break
+            stdscr.timeout(-1)
+            if seq == "\033":
+                return "\033", None        # ESC simple (quitter l'éditeur)
+            code = _ESC_MAP.get(seq)
+            return (None, code) if code is not None else (None, None)
         return key, None
+
     return None, key
 
 
@@ -836,8 +950,55 @@ def _git_exec(stdscr, project_path: Path, action: str, remote: str) -> str | Non
     return None
 
 
+def _wait_wifi_up(stdscr, timeout: int = 20) -> bool:
+    """Attend la reconnexion automatique après activation du radio WiFi.
+    Affiche un écran d'attente. Retourne True dès qu'une connexion est détectée."""
+    for elapsed in range(timeout):
+        if _is_wifi_connected():
+            return True
+        dots = "." * ((elapsed % 3) + 1)
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        msg = f"Activation du WiFi{dots}"
+        try:
+            stdscr.addstr(h // 2, max(0, (w - len(msg)) // 2), msg, curses.A_DIM)
+        except curses.error:
+            pass
+        bottombar(stdscr, f"  Reconnexion automatique en cours...  ({timeout - elapsed}s)")
+        stdscr.refresh()
+        time.sleep(1)
+    return _is_wifi_connected()
+
+
 def git_page(stdscr, project_path: Path):
-    """Page Git plein écran."""
+    """Page Git plein écran — gère l'état WiFi avant d'entrer."""
+    _wifi_managed = _settings.get("wifi_off", False)
+
+    # WiFi désactivé : l'activer et attendre reconnexion automatique
+    if _wifi_managed:
+        _wifi_set_radio(True)
+        _wait_wifi_up(stdscr)
+
+    # Toujours pas connecté → écran de connexion WiFi
+    if not _is_wifi_connected():
+        _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
+        _wifi_connect_screen(stdscr)
+
+    # Dernier contrôle — si l'utilisateur a annulé sans se connecter
+    if not _is_wifi_connected():
+        if _wifi_managed:
+            _wifi_set_radio(False)
+        _flash(stdscr, "Git necessite une connexion WiFi.")
+        return
+
+    try:
+        _git_page_inner(stdscr, project_path)
+    finally:
+        if _wifi_managed:
+            _wifi_set_radio(False)
+
+
+def _git_page_inner(stdscr, project_path: Path):
     sel = 0
     flash = ""
     flash_until = 0.0
@@ -944,6 +1105,7 @@ class Editor:
         self.cx = 0
         self.oy = 0
         self.ox = 0
+        self.sel_anchor: "tuple[int,int] | None" = None
         self._load()
 
     def _load(self):
@@ -954,9 +1116,85 @@ class Editor:
                 self.lines.pop()
         if not self.lines:
             self.lines = [""]
+        # Ouvrir en bas du fichier
+        self.cy = len(self.lines) - 1
+        self.cx = len(self.lines[self.cy])
 
     def _save(self):
         self.filepath.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+
+    # ── sélection ────────────────────────────────────────────────────────────
+
+    def _sel_range(self) -> "tuple[tuple[int,int],tuple[int,int]] | None":
+        if self.sel_anchor is None:
+            return None
+        a, b = self.sel_anchor, (self.cy, self.cx)
+        if a == b:
+            return None
+        return (min(a, b), max(a, b))
+
+    def _sel_clear(self):
+        self.sel_anchor = None
+
+    def _sel_anchor_here(self):
+        if self.sel_anchor is None:
+            self.sel_anchor = (self.cy, self.cx)
+
+    def _sel_delete(self):
+        rng = self._sel_range()
+        if not rng:
+            self._sel_clear()
+            return
+        (r1, c1), (r2, c2) = rng
+        if r1 == r2:
+            ln = self.lines[r1]
+            self.lines[r1] = ln[:c1] + ln[c2:]
+        else:
+            self.lines[r1] = self.lines[r1][:c1] + self.lines[r2][c2:]
+            del self.lines[r1 + 1:r2 + 1]
+        self.cy, self.cx = r1, c1
+        self._sel_clear()
+
+    # ── affichage ─────────────────────────────────────────────────────────────
+
+    def _draw_line(self, stdscr, screen_row: int, line_idx: int, w: int):
+        if line_idx >= len(self.lines):
+            return
+        line    = self.lines[line_idx]
+        visible = line[self.ox:self.ox + w - 1]
+        rng     = self._sel_range()
+
+        if rng is None:
+            try:
+                stdscr.addstr(screen_row, 0, visible)
+            except curses.error:
+                pass
+            return
+
+        (r1, c1), (r2, c2) = rng
+        if line_idx < r1 or line_idx > r2:
+            try:
+                stdscr.addstr(screen_row, 0, visible)
+            except curses.error:
+                pass
+            return
+
+        sel_a = c1 if line_idx == r1 else 0
+        sel_b = c2 if line_idx == r2 else len(line)
+
+        def vis(col):
+            return max(0, min(col - self.ox, len(visible)))
+
+        va, vb = vis(sel_a), vis(sel_b)
+        try:
+            if va > 0:
+                stdscr.addstr(screen_row, 0,  visible[:va])
+            if va < vb:
+                stdscr.addstr(screen_row, va, visible[va:vb], curses.A_REVERSE)
+            if vb < len(visible):
+                stdscr.addstr(screen_row, vb, visible[vb:])
+        except curses.error:
+            pass
 
     def run(self, stdscr):
         prev_curs = curses.curs_set(1)
@@ -966,49 +1204,84 @@ class Editor:
             while True:
                 h, w = stdscr.getmaxyx()
                 self._scroll(h, w)
-                self._draw(stdscr, h, w)
+
+                stdscr.erase()
+                topbar(stdscr, self.filepath.name, status=False)
+                for row in range(h - 2):
+                    self._draw_line(stdscr, row + 1, self.oy + row, w)
+                sel_hint = "  [selection]  Backspace suppr" if self.sel_anchor is not None else ""
+                bottombar(stdscr, f"  L{self.cy + 1}:{self.cx + 1}{sel_hint}   Ctrl+Q Quitter")
+                try:
+                    stdscr.move(self.cy - self.oy + 1, self.cx - self.ox)
+                except curses.error:
+                    pass
+                stdscr.refresh()
 
                 ch, code = next_key(stdscr)
 
                 if ch is not None:
                     c = ord(ch)
-                    if c == 17:                  # Ctrl+Q
+                    if c == 17 or c == 27:   # Ctrl+Q ou ESC
                         break
                     elif ch in ("\n", "\r"):
-                        self._newline()
-                        self._save()
-                    elif c in (127, 8):          # Backspace
-                        self._backspace()
-                        self._save()
+                        self._sel_clear()
+                        self._newline(); self._save()
+                    elif c in (127, 8):      # Backspace
+                        if self.sel_anchor is not None:
+                            self._sel_delete(); self._save()
+                        else:
+                            self._backspace(); self._save()
                     elif ch == "\t":
-                        self._insert("    ")
-                        self._save()
+                        self._sel_clear()
+                        self._insert("    "); self._save()
                     elif c >= 32:
-                        self._insert(ch)
-                        self._save()
+                        if self.sel_anchor is not None:
+                            self._sel_delete()
+                        self._insert(ch); self._save()
+
                 elif code is not None:
-                    if code == curses.KEY_UP:
-                        self._move_up()
+                    # Ctrl+← / Ctrl+→  (début / fin de ligne)
+                    if code in (546, 543, 545):
+                        self._sel_clear(); self.cx = 0
+                    elif code in (561, 558, 560):
+                        self._sel_clear(); self.cx = len(self.lines[self.cy])
+                    # Ctrl+Shift+← / → (sélection jusqu'au bout de la ligne)
+                    elif code in (580, 583, 582):
+                        self._sel_anchor_here(); self.cx = 0
+                    elif code in (595, 598, 597):
+                        self._sel_anchor_here(); self.cx = len(self.lines[self.cy])
+                    # Shift+← / →  (étendre la sélection caractère par caractère)
+                    elif code == curses.KEY_SLEFT:
+                        self._sel_anchor_here(); self._move_left()
+                    elif code == curses.KEY_SRIGHT:
+                        self._sel_anchor_here(); self._move_right()
+                    # Navigation simple (efface la sélection)
+                    elif code == curses.KEY_UP:
+                        self._sel_clear(); self._move_up()
                     elif code == curses.KEY_DOWN:
-                        self._move_down()
+                        self._sel_clear(); self._move_down()
                     elif code == curses.KEY_LEFT:
-                        self._move_left()
+                        self._sel_clear(); self._move_left()
                     elif code == curses.KEY_RIGHT:
-                        self._move_right()
+                        self._sel_clear(); self._move_right()
                     elif code == curses.KEY_HOME:
-                        self.cx = 0
+                        self._sel_clear(); self.cx = 0
                     elif code == curses.KEY_END:
-                        self.cx = len(self.lines[self.cy])
+                        self._sel_clear(); self.cx = len(self.lines[self.cy])
                     elif code == curses.KEY_PPAGE:
-                        self._page_up(h)
+                        self._sel_clear(); self._page_up(h)
                     elif code == curses.KEY_NPAGE:
-                        self._page_down(h)
+                        self._sel_clear(); self._page_down(h)
                     elif code == curses.KEY_BACKSPACE:
-                        self._backspace()
-                        self._save()
+                        if self.sel_anchor is not None:
+                            self._sel_delete(); self._save()
+                        else:
+                            self._backspace(); self._save()
                     elif code == curses.KEY_DC:
-                        self._delete()
-                        self._save()
+                        if self.sel_anchor is not None:
+                            self._sel_delete(); self._save()
+                        else:
+                            self._delete(); self._save()
 
         finally:
             curses.curs_set(prev_curs)
@@ -1023,28 +1296,6 @@ class Editor:
             self.ox = self.cx
         elif self.cx >= self.ox + w:
             self.ox = self.cx - w + 1
-
-    def _draw(self, stdscr, h, w):
-        stdscr.erase()
-        topbar(stdscr, self.filepath.name, status=False)
-
-        content_h = h - 2
-        for row in range(content_h):
-            line_idx = self.oy + row
-            if line_idx < len(self.lines):
-                visible = self.lines[line_idx][self.ox:self.ox + w - 1]
-                try:
-                    stdscr.addstr(row + 1, 0, visible)
-                except curses.error:
-                    pass
-
-        bottombar(stdscr, f"  L{self.cy + 1}:{self.cx + 1}   Ctrl+Q Quitter")
-
-        try:
-            stdscr.move(self.cy - self.oy + 1, self.cx - self.ox)
-        except curses.error:
-            pass
-        stdscr.refresh()
 
     def _move_up(self):
         if self.cy > 0:
@@ -1136,8 +1387,13 @@ def _export_project_usb(stdscr, project_path: Path):
         _text_page(stdscr, "Erreur export projet", [str(e)])
 
 
-def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
+def browse_screen(stdscr, directory: Path, is_project_root: bool = False,
+                  _restore: "Path | None" = None,
+                  _proj_root: "Path | None" = None):
+    if is_project_root:
+        _proj_root = directory
     sel = 0
+    _did_restore = False
 
     while True:
         is_repo = is_project_root and git_available() and git_is_repo(directory)
@@ -1147,6 +1403,24 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
         )
         sel = clamp(sel, 0, max(0, len(items) - 1))
 
+        # Navigation automatique vers le dernier fichier ouvert
+        if _restore and not _did_restore:
+            _did_restore = True
+            try:
+                if _restore.parent == directory:
+                    sel = next(i for i, p in enumerate(items) if p == _restore)
+                elif _restore.is_relative_to(directory):
+                    next_dir = directory / _restore.relative_to(directory).parts[0]
+                    if next_dir.is_dir():
+                        try:
+                            sel = next(i for i, p in enumerate(items) if p == next_dir)
+                        except StopIteration:
+                            pass
+                        browse_screen(stdscr, next_dir, _restore=_restore, _proj_root=_proj_root)
+                        continue
+            except (StopIteration, ValueError):
+                pass
+
         # Badge git dans la topbar
         git_badge = ""
         if is_repo:
@@ -1154,10 +1428,10 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
             git_badge = f"  ● {branch}" if git_has_changes(directory) else f"  ✓ {branch}"
 
         if is_project_root:
-            bar = "  -> <- Nav   F Fich   D Doss   X Suppr   R Renom   M Dep   U USB"
+            bar = "  -> Nav   F Fich   D Doss   C Copie   X Suppr   R Renom   M Dep   U USB"
             bar += "   G Git" if git_available() else ""
         else:
-            bar = "  -> <- Nav   F Fichier   D Dossier   X Suppr   R Renommer   M Deplacer"
+            bar = "  -> Nav   F Fich   D Doss   C Copie   X Suppr   R Renommer   M Deplacer"
 
         stdscr.erase()
         topbar(stdscr, directory.name + git_badge)
@@ -1175,9 +1449,15 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
             if items:
                 item = items[sel]
                 if item.is_dir():
-                    browse_screen(stdscr, item)
+                    browse_screen(stdscr, item, _proj_root=_proj_root)
                 else:
                     Editor(item).run(stdscr)
+                    if _proj_root:
+                        _settings["last_open"] = {
+                            "project": _proj_root.name,
+                            "path": str(item),
+                        }
+                        _save_settings()
         elif code == curses.KEY_LEFT:
             return
         elif ch is not None:
@@ -1190,11 +1470,37 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
                     if not path.exists():
                         path.touch()
                     Editor(path).run(stdscr)
+                    if _proj_root:
+                        _settings["last_open"] = {"project": _proj_root.name, "path": str(path)}
+                        _save_settings()
 
             elif k == "d":
                 name = get_input(stdscr, "Nom du dossier")
                 if name:
                     (directory / name).mkdir(exist_ok=True)
+
+            elif k == "c" and items:
+                item = items[sel]
+                if item.is_dir():
+                    dest = item.parent / (item.name + "_copie")
+                    n = 2
+                    while dest.exists():
+                        dest = item.parent / f"{item.name}_copie{n}"; n += 1
+                    _loader(stdscr, f"Copie de '{item.name}'...")
+                    try:
+                        shutil.copytree(item, dest)
+                    except Exception as e:
+                        _text_page(stdscr, "Erreur copie", [str(e)])
+                else:
+                    stem, suffix = item.stem, item.suffix
+                    dest = item.parent / f"{stem}_copie{suffix}"
+                    n = 2
+                    while dest.exists():
+                        dest = item.parent / f"{stem}_copie{n}{suffix}"; n += 1
+                    try:
+                        shutil.copy2(item, dest)
+                    except Exception as e:
+                        _text_page(stdscr, "Erreur copie", [str(e)])
 
             elif k == "x" and items:
                 item = items[sel]
@@ -1237,7 +1543,7 @@ _LOGO = [
     r"  ___  ___  ___ ___ _ _ ___ ___ _____ ___ ",
     r" | __|| _ \| __| __| | | _ \_ _|_   _| __|",
     r" | _| |   /| _|| _|| | |   /| |  | | | _| ",
-    r" |_|  |_|_\|___|___|\_/|_|_\___|  |_| |___|",
+    r" |_|  |_|_\|___|___|\_/|_|_\__|  |_| |___|",
 ]
 _TAGLINE = "ecrire, sans distraction"
 
@@ -1260,6 +1566,9 @@ def _fetch_latest_tag() -> "str | None":
 
 
 def _update_app(stdscr):
+    _wifi_managed = _settings.get("wifi_off", False)
+    if _wifi_managed:
+        _wifi_set_radio(True)
     _loader(stdscr, "Recherche de la derniere version...")
     tag = _fetch_latest_tag()
     if not tag:
@@ -1299,6 +1608,9 @@ def _update_app(stdscr):
         ])
     except Exception as e:
         _text_page(stdscr, "Erreur", [str(e)])
+    finally:
+        if _wifi_managed:
+            _wifi_set_radio(False)
 
 
 def _is_autostart_enabled() -> bool:
@@ -1423,13 +1735,18 @@ def _wifi_connect_screen(stdscr):
 
 def settings_screen(stdscr):
     """Écran des paramètres."""
-    _THEMES    = [("dark", "Sombre"), ("light", "Clair")]
-    WIFI_IDX   = len(_THEMES)          # 2
-    UPDATE_IDX = len(_THEMES) + 1      # 3
-    AUTO_IDX   = len(_THEMES) + 2      # 4
-    TOTAL      = len(_THEMES) + 3      # 5
-    current    = _settings.get("theme", "dark")
-    sel        = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
+    _THEMES       = [
+        ("dark",  "Sombre"),
+        ("light", "Clair"),
+        ("sepia", "Doux  —  confort visuel (fond creme, texte brun-gris)"),
+    ]
+    WIFI_IDX      = len(_THEMES)          # 3
+    WIFI_OFF_IDX  = len(_THEMES) + 1      # 4
+    UPDATE_IDX    = len(_THEMES) + 2      # 5
+    AUTO_IDX      = len(_THEMES) + 3      # 6
+    TOTAL         = len(_THEMES) + 4      # 7
+    current       = _settings.get("theme", "dark")
+    sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
     def _sep(row):
         try:
@@ -1475,8 +1792,10 @@ def settings_screen(stdscr):
         # ── Reseau ──
         _heading(row, "Reseau");  row += 2
         ssid  = _sys_cache.get("wifi", "")
-        extra = f"   ({ssid})" if ssid and ssid != "WiFi:--" else ""
-        _item(row, WIFI_IDX, "Se connecter au WiFi" + extra);  row += 2
+        extra = f"   ({ssid})" if ssid and ssid != "WiFi:--" and ssid != "WiFi:OFF" else ""
+        _item(row, WIFI_IDX, "Se connecter au WiFi" + extra);  row += 1
+        wifi_off_state = "active" if _settings.get("wifi_off", False) else "desactive"
+        _item(row, WIFI_OFF_IDX, f"Desactiver WiFi hors git/MAJ : {wifi_off_state}");  row += 2
 
         _sep(row);  row += 2
 
@@ -1502,7 +1821,15 @@ def settings_screen(stdscr):
                 _save_settings()
                 _apply_theme(stdscr)
             elif sel == WIFI_IDX:
+                if _settings.get("wifi_off", False):
+                    _wifi_set_radio(True)
                 _wifi_connect_screen(stdscr)
+            elif sel == WIFI_OFF_IDX:
+                new_val = not _settings.get("wifi_off", False)
+                _settings["wifi_off"] = new_val
+                _save_settings()
+                _wifi_set_radio(not new_val)
+                _sys_cache["ts"] = 0.0
             elif sel == UPDATE_IDX:
                 _update_app(stdscr)
             elif sel == AUTO_IDX:
@@ -1620,7 +1947,17 @@ def home_screen(stdscr):
             sel = min(total - 1, sel + 1)
         elif code in (curses.KEY_RIGHT, curses.KEY_ENTER) or ch in ("\n", "\r"):
             if sel < n:
-                browse_screen(stdscr, projects[sel], is_project_root=True)
+                proj = projects[sel]
+                restore = None
+                last = _settings.get("last_open", {})
+                if last.get("project") == proj.name:
+                    try:
+                        rp = Path(last["path"])
+                        if rp.exists() and rp.is_relative_to(proj):
+                            restore = rp
+                    except Exception:
+                        pass
+                browse_screen(stdscr, proj, is_project_root=True, _restore=restore)
             elif sel == n:
                 name = get_input(stdscr, "Nom du nouveau projet")
                 if name:
@@ -1634,9 +1971,9 @@ def home_screen(stdscr):
             elif sel == n + 2:
                 return
         elif k == "x" and sel < n:
-            proj = projects[sel]
-            if confirm(stdscr, f"Supprimer le projet \"{proj.name}\" et tout son contenu ?"):
-                shutil.rmtree(proj)
+            to_del = projects[sel]
+            if confirm(stdscr, f"Supprimer le projet \"{to_del.name}\" et tout son contenu ?"):
+                shutil.rmtree(to_del)
                 sel = max(0, sel - 1)
         elif k == "q" or (ch is not None and ord(ch) == 27):
             return
@@ -1654,8 +1991,27 @@ def main(stdscr):
     _load_settings()
     _apply_theme(stdscr)
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Force les codes clavier (indépendant du terminfo)
+    # Sur Mac : Ctrl+←/→ est intercepté par macOS ; Terminal.app envoie
+    # \033b / \033f (Option+←/→) à la place — on les mappe aux mêmes actions.
+    for _seq, _code in [
+        ("\033[1;5D", 546), ("\033[1;5C", 561),   # Ctrl+←/→  (Linux / iTerm2)
+        ("\033b",     546), ("\033f",     561),   # Option+←/→ (Terminal.app Mac)
+        ("\033[1;6D", 580), ("\033[1;6C", 595),   # Ctrl+Shift+←/→ (Linux / iTerm2)
+        ("\033[1;4D", 580), ("\033[1;4C", 595),   # Option+Shift+←/→ (Terminal.app Mac)
+    ]:
+        try:
+            curses.define_key(_seq, _code)
+        except Exception:
+            pass
+
+    if _settings.get("wifi_off", False):
+        _wifi_set_radio(False)
+
     home_screen(stdscr)
 
 
 if __name__ == "__main__":
+    os.environ.setdefault("ESCDELAY", "25")   # ESC réactif sans attendre 1 s
     curses.wrapper(main)
