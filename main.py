@@ -1567,12 +1567,32 @@ def _fetch_latest_tag() -> "str | None":
 
 def _update_app(stdscr):
     _wifi_managed = _settings.get("wifi_off", False)
+
+    # Même logique que git_page : activer + attendre + connecter si besoin
     if _wifi_managed:
         _wifi_set_radio(True)
+        _wait_wifi_up(stdscr)
+
+    if not _is_wifi_connected():
+        _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
+        _wifi_connect_screen(stdscr)
+
+    if not _is_wifi_connected():
+        if _wifi_managed:
+            _wifi_set_radio(False)
+        _flash(stdscr, "La mise a jour necessite une connexion WiFi.")
+        return
+
     _loader(stdscr, "Recherche de la derniere version...")
     tag = _fetch_latest_tag()
     if not tag:
-        _text_page(stdscr, "Mise a jour", ["Impossible de contacter GitHub.", "", "Verifiez votre connexion."])
+        _text_page(stdscr, "Mise a jour", [
+            "Impossible de joindre GitHub.",
+            "",
+            f"URL tentee : api.github.com/repos/{_GITHUB_REPO}/tags",
+            "",
+            "Verifiez que la connexion fonctionne correctement.",
+        ])
         return
 
     current = _settings.get("version", "inconnue")
