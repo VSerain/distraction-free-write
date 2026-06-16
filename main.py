@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import json
 import time
 import curses
@@ -1230,6 +1231,110 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False):
                 git_page(stdscr, directory)
 
 
+# ── logo ASCII art ───────────────────────────────────────────────────────────
+
+_LOGO = [
+    r"  ___  ___  ___ ___ _ _ ___ ___ _____ ___ ",
+    r" | __|| _ \| __| __| | | _ \_ _|_   _| __|",
+    r" | _| |   /| _|| _|| | |   /| |  | | | _| ",
+    r" |_|  |_|_\|___|___|\_/|_|_\___|  |_| |___|",
+]
+_TAGLINE = "ecrire, sans distraction"
+
+_GITHUB_REPO = "VSerain/distraction-free-write"
+_INSTALL_PATH = Path("/opt/freewrite/main.py")
+
+
+# ── mise à jour et démarrage auto ────────────────────────────────────────────
+
+def _fetch_latest_tag() -> "str | None":
+    try:
+        r = subprocess.run(
+            ["curl", "-fsSL", f"https://api.github.com/repos/{_GITHUB_REPO}/tags"],
+            capture_output=True, text=True, timeout=15,
+        )
+        tags = json.loads(r.stdout)
+        return tags[0]["name"] if tags else None
+    except Exception:
+        return None
+
+
+def _update_app(stdscr):
+    _loader(stdscr, "Recherche de la derniere version...")
+    tag = _fetch_latest_tag()
+    if not tag:
+        _text_page(stdscr, "Mise a jour", ["Impossible de contacter GitHub.", "", "Verifiez votre connexion."])
+        return
+
+    current = _settings.get("version", "inconnue")
+    if not confirm(stdscr, f"Installer {tag}  (version actuelle : {current}) ?"):
+        return
+
+    _loader(stdscr, f"Telechargement de {tag}...")
+    url = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/{tag}/main.py"
+    tmp = Path("/tmp/freewrite_update.py")
+    try:
+        r = subprocess.run(["curl", "-fsSL", url, "-o", str(tmp)],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            _text_page(stdscr, "Erreur telechargement", r.stderr.splitlines())
+            return
+        if not _INSTALL_PATH.parent.exists():
+            _text_page(stdscr, "Erreur", [f"{_INSTALL_PATH} introuvable.", "", "L'application est-elle installee via install.sh ?"])
+            return
+        if not os.access(_INSTALL_PATH, os.W_OK):
+            _text_page(stdscr, "Erreur permissions", [
+                f"Impossible d'ecrire dans {_INSTALL_PATH}.",
+                "",
+                "Relancez l'installation : sudo bash install.sh",
+            ])
+            return
+        shutil.copy2(tmp, _INSTALL_PATH)
+        _settings["version"] = tag
+        _save_settings()
+        _text_page(stdscr, "Mise a jour reussie", [
+            f"Version {tag} installee.",
+            "",
+            "Quittez et relancez l'application pour appliquer.",
+        ])
+    except Exception as e:
+        _text_page(stdscr, "Erreur", [str(e)])
+
+
+def _is_autostart_enabled() -> bool:
+    profile = Path.home() / ".bash_profile"
+    return profile.exists() and "freewrite" in profile.read_text()
+
+
+def _toggle_autostart(stdscr):
+    profile = Path.home() / ".bash_profile"
+    if _is_autostart_enabled():
+        if not confirm(stdscr, "Desactiver le demarrage automatique ?"):
+            return
+        text = profile.read_text()
+        text = re.sub(
+            r"\n# Lancer Freewrite automatiquement.*?fi\n",
+            "\n",
+            text,
+            flags=re.DOTALL,
+        )
+        profile.write_text(text)
+        _flash(stdscr, "Demarrage automatique desactive")
+    else:
+        if not confirm(stdscr, "Activer le demarrage automatique sur TTY1 ?"):
+            return
+        if not profile.exists():
+            profile.write_text("# ~/.bash_profile\n[[ -f ~/.bashrc ]] && source ~/.bashrc\n")
+        with open(profile, "a") as f:
+            f.write(
+                "\n# Lancer Freewrite automatiquement sur TTY1\n"
+                'if [ "$(tty)" = "/dev/tty1" ]; then\n'
+                "    freewrite\n"
+                "fi\n"
+            )
+        _flash(stdscr, "Demarrage automatique active")
+
+
 def _wifi_connect_screen(stdscr):
     """Liste les réseaux WiFi et permet de s'y connecter via nmcli."""
     _loader(stdscr, "Recherche des reseaux WiFi...")
@@ -1318,70 +1423,69 @@ def _wifi_connect_screen(stdscr):
 
 def settings_screen(stdscr):
     """Écran des paramètres."""
-    _THEMES = [("dark", "Sombre"), ("light", "Clair")]
-    # indices : 0,1 = thèmes  |  2 = wifi
-    WIFI_IDX = len(_THEMES)
-    TOTAL    = len(_THEMES) + 1
-    current  = _settings.get("theme", "dark")
-    sel      = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
+    _THEMES    = [("dark", "Sombre"), ("light", "Clair")]
+    WIFI_IDX   = len(_THEMES)          # 2
+    UPDATE_IDX = len(_THEMES) + 1      # 3
+    AUTO_IDX   = len(_THEMES) + 2      # 4
+    TOTAL      = len(_THEMES) + 3      # 5
+    current    = _settings.get("theme", "dark")
+    sel        = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
+
+    def _sep(row):
+        try:
+            stdscr.addstr(row, 3, "-" * min(w - 6, 50), curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _heading(row, text):
+        try:
+            stdscr.addstr(row, 3, text, curses.A_BOLD)
+        except curses.error:
+            pass
+
+    def _item(row, idx, label):
+        if row >= h - 1:
+            return
+        is_sel = (sel == idx)
+        line = f"  {'>' if is_sel else ' '}  {label}"
+        try:
+            if is_sel:
+                stdscr.attron(curses.A_REVERSE)
+                stdscr.addstr(row, 0, line[:w].ljust(w))
+                stdscr.attroff(curses.A_REVERSE)
+            else:
+                stdscr.addstr(row, 0, line[:w])
+        except curses.error:
+            pass
 
     while True:
         h, w = stdscr.getmaxyx()
         stdscr.erase()
-        topbar(stdscr, "Paramètres")
-
+        topbar(stdscr, "Parametres")
         row = 3
-        try:
-            stdscr.addstr(row, 3, "Theme", curses.A_BOLD)
-        except curses.error:
-            pass
-        row += 2
 
+        # ── Theme ──
+        _heading(row, "Theme");  row += 2
         for i, (key, label) in enumerate(_THEMES):
-            if row >= h - 1:
-                break
-            is_sel = (sel == i)
             active = "  <- actif" if key == _settings.get("theme") else ""
-            line = f"  {'>' if is_sel else ' '}  {label}{active}"
-            try:
-                if is_sel:
-                    stdscr.attron(curses.A_REVERSE)
-                    stdscr.addstr(row, 0, line[:w].ljust(w))
-                    stdscr.attroff(curses.A_REVERSE)
-                else:
-                    stdscr.addstr(row, 0, line[:w])
-            except curses.error:
-                pass
-            row += 1
+            _item(row, i, label + active);  row += 1
 
-        row += 1
-        try:
-            stdscr.addstr(row, 3, "─" * min(w - 6, 50), curses.A_DIM)
-        except curses.error:
-            pass
-        row += 2
+        row += 1;  _sep(row);  row += 2
 
-        try:
-            stdscr.addstr(row, 3, "Reseau", curses.A_BOLD)
-        except curses.error:
-            pass
-        row += 2
+        # ── Reseau ──
+        _heading(row, "Reseau");  row += 2
+        ssid  = _sys_cache.get("wifi", "")
+        extra = f"   ({ssid})" if ssid and ssid != "WiFi:--" else ""
+        _item(row, WIFI_IDX, "Se connecter au WiFi" + extra);  row += 2
 
-        if row < h - 1:
-            is_sel = (sel == WIFI_IDX)
-            ssid   = _sys_cache["wifi"] if _sys_cache["wifi"] else ""
-            label  = f"  {'>' if is_sel else ' '}  Se connecter au WiFi"
-            if ssid and ssid != "WiFi:--":
-                label += f"   (actuel : {ssid})"
-            try:
-                if is_sel:
-                    stdscr.attron(curses.A_REVERSE)
-                    stdscr.addstr(row, 0, label[:w].ljust(w))
-                    stdscr.attroff(curses.A_REVERSE)
-                else:
-                    stdscr.addstr(row, 0, label[:w])
-            except curses.error:
-                pass
+        _sep(row);  row += 2
+
+        # ── Application ──
+        _heading(row, "Application");  row += 2
+        ver = _settings.get("version", "?")
+        _item(row, UPDATE_IDX, f"Installer la derniere version   (actuelle : {ver})");  row += 1
+        auto_state = "active" if _is_autostart_enabled() else "desactive"
+        _item(row, AUTO_IDX, f"Demarrage automatique : {auto_state}")
 
         bottombar(stdscr, "  haut/bas Naviguer   -> Appliquer / Ouvrir   <- Retour")
         stdscr.refresh()
@@ -1399,28 +1503,54 @@ def settings_screen(stdscr):
                 _apply_theme(stdscr)
             elif sel == WIFI_IDX:
                 _wifi_connect_screen(stdscr)
+            elif sel == UPDATE_IDX:
+                _update_app(stdscr)
+            elif sel == AUTO_IDX:
+                _toggle_autostart(stdscr)
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             return
 
 
 def home_screen(stdscr):
-    """Écran d'accueil : projets + menu."""
+    """Écran d'accueil : logo centré + projets + menu."""
     sel = 0
+    logo_w = max(len(l) for l in _LOGO)
 
     while True:
         projects = sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir())
         n = len(projects)
-        # indices : 0..n-1 = projets, n = nouveau, n+1 = paramètres, n+2 = quitter
-        total = n + 3
+        total = n + 3   # n projets + Nouveau + Paramètres + Quitter
         sel = clamp(sel, 0, total - 1)
 
         h, w = stdscr.getmaxyx()
         stdscr.erase()
-        topbar(stdscr, "Freewrite")
+        topbar(stdscr, "")
 
+        # ── Logo centré ──────────────────────────────────────────────────────
+        lx  = max(0, (w - logo_w) // 2)
         row = 2
+        for line in _LOGO:
+            try:
+                stdscr.addstr(row, lx, line[:w - lx], curses.A_BOLD)
+            except curses.error:
+                pass
+            row += 1
+        row += 1
+        tx = max(0, (w - len(_TAGLINE)) // 2)
+        try:
+            stdscr.addstr(row, tx, _TAGLINE, curses.A_DIM)
+        except curses.error:
+            pass
+        row += 2
+        sep_w = min(logo_w, w - 6)
+        sx = max(0, (w - sep_w) // 2)
+        try:
+            stdscr.addstr(row, sx, "-" * sep_w, curses.A_DIM)
+        except curses.error:
+            pass
+        row += 2
 
-        # Section projets
+        # ── Projets ──────────────────────────────────────────────────────────
         try:
             stdscr.addstr(row, 3, "Projets", curses.A_BOLD)
         except curses.error:
@@ -1435,7 +1565,7 @@ def home_screen(stdscr):
             row += 1
         else:
             for i, proj in enumerate(projects):
-                if row >= h - 1:
+                if row >= h - 2:
                     break
                 is_sel = (sel == i)
                 line = f"  {'>' if is_sel else ' '}  {proj.name}"
@@ -1451,14 +1581,13 @@ def home_screen(stdscr):
                 row += 1
 
         row += 1
-        # Séparateur
         try:
-            stdscr.addstr(row, 3, "─" * min(w - 6, 50), curses.A_DIM)
+            stdscr.addstr(row, 3, "-" * min(sep_w, w - 6), curses.A_DIM)
         except curses.error:
             pass
         row += 2
 
-        # Menu fixe
+        # ── Menu fixe ─────────────────────────────────────────────────────────
         menu_items = [
             (n,     "  +  Nouveau projet"),
             (n + 1, "  *  Parametres"),

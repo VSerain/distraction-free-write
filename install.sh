@@ -78,10 +78,18 @@ title "2/4  Installation de l'application"
 INSTALL_DIR="/opt/freewrite"
 mkdir -p "$INSTALL_DIR"
 
-echo -e "  Téléchargement de main.py..."
-curl -fsSL "$REPO_RAW/main.py" -o "$INSTALL_DIR/main.py"
+# Récupérer la version (dernier tag GitHub)
+LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/VSerain/distraction-free-write/tags" \
+    2>/dev/null | python3 -c "import sys,json; t=json.load(sys.stdin); print(t[0]['name'] if t else 'main')" 2>/dev/null || echo "main")
+
+echo -e "  Téléchargement de main.py  (version : $LATEST_TAG)..."
+curl -fsSL "https://raw.githubusercontent.com/VSerain/distraction-free-write/$LATEST_TAG/main.py" \
+    -o "$INSTALL_DIR/main.py"
 chmod 644 "$INSTALL_DIR/main.py"
-info "Application installée dans $INSTALL_DIR"
+# Propriétaire = utilisateur réel pour permettre les mises à jour depuis l'app
+chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR/main.py"
+chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
+info "Application installée dans $INSTALL_DIR  ($LATEST_TAG)"
 
 # Lanceur global
 cat > /usr/local/bin/freewrite << 'EOF'
@@ -160,6 +168,7 @@ echo -e "  Application    ${GRN}/opt/freewrite/main.py${RST}"
 echo -e "  Commande       ${GRN}freewrite${RST}"
 echo -e "  Projets        ${GRN}$REAL_HOME/Projets${RST}"
 echo -e "  Configuration  ${GRN}$REAL_HOME/.config/freewrite/config.json${RST}"
+echo -e "  Version        ${GRN}$LATEST_TAG${RST}"
 echo ""
 
 if [[ "$AUTOSTART" =~ ^[oOyY]$ ]]; then
