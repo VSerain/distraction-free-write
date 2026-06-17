@@ -40,9 +40,14 @@ def _apply_theme(stdscr):
     elif theme == "sepia":
         # Fond crème chaud + texte brun-gris doux → réduction fatigue visuelle
         if curses.can_change_color() and curses.COLORS >= 16:
-            curses.init_color(8, 973, 941, 863)   # #F8F0DC — parchemin chaud
-            curses.init_color(9, 239, 208, 188)   # #3D3530 — brun-gris doux
+            curses.init_color(8, 973, 941, 863)   # fond crème
+            curses.init_color(9, 239, 208, 188)   # texte brun-gris
             curses.init_pair(1, 9, 8)
+        elif curses.can_change_color() and curses.COLORS >= 8:
+            # TTY 8 couleurs (Debian standard) : indices 5/6 non utilisés ailleurs
+            curses.init_color(6, 973, 941, 863)   # fond crème
+            curses.init_color(5, 239, 208, 188)   # texte brun-gris
+            curses.init_pair(1, 5, 6)
         else:
             curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_YELLOW)
         stdscr.bkgd(" ", curses.color_pair(1))
