@@ -358,15 +358,22 @@ _ESC_MAP: dict[str, int] = {
     # Ctrl + ← / →  (Linux / xterm / iTerm2)
     "\033[1;5D": 546, "\033[5D": 546,
     "\033[1;5C": 561, "\033[5C": 561,
-    # Ctrl+Shift + ← / →  (Linux / xterm / iTerm2)
+    # Ctrl+Shift + ← / → / ↑ / ↓  (Linux / xterm / iTerm2)
     "\033[1;6D": 580,
     "\033[1;6C": 595,
+    "\033[1;6A": 570,   # Ctrl+Shift+↑
+    "\033[1;6B": 575,   # Ctrl+Shift+↓
+    # Shift + ↑ / ↓
+    "\033[1;2A": 337,   # KEY_SR  (Shift+Up)
+    "\033[1;2B": 336,   # KEY_SF  (Shift+Down)
     # Mac Option + ← / →  (Terminal.app)
     "\033b": 546,
     "\033f": 561,
-    # Mac Option+Shift + ← / →  (Terminal.app)
+    # Mac Option+Shift + toutes directions  (Terminal.app)
     "\033[1;4D": 580,
     "\033[1;4C": 595,
+    "\033[1;4A": 570,   # Option+Shift+↑
+    "\033[1;4B": 575,   # Option+Shift+↓
 }
 
 
@@ -1242,16 +1249,25 @@ class Editor:
                         self._sel_clear(); self.cx = 0
                     elif code in (561, 558, 560):
                         self._sel_clear(); self.cx = len(self.lines[self.cy])
-                    # Ctrl+Shift+← / → (sélection jusqu'au bout de la ligne)
-                    elif code in (580, 583, 582):
-                        self._sel_anchor_here(); self.cx = 0
-                    elif code in (595, 598, 597):
-                        self._sel_anchor_here(); self.cx = len(self.lines[self.cy])
-                    # Shift+← / →  (étendre la sélection caractère par caractère)
-                    elif code == curses.KEY_SLEFT:
+                    # Ctrl+Shift+←/→/↑/↓ et Shift+←/→ : étendre la sélection
+                    elif code in (580, 583, 582) or code == curses.KEY_SLEFT:
                         self._sel_anchor_here(); self._move_left()
-                    elif code == curses.KEY_SRIGHT:
+                    elif code in (595, 598, 597) or code == curses.KEY_SRIGHT:
                         self._sel_anchor_here(); self._move_right()
+                    elif code in (570, 337):   # Ctrl+Shift+↑ ou Shift+↑
+                        self._sel_anchor_here()
+                        if self.cy > 0:
+                            self.cy -= 1
+                            self.cx = len(self.lines[self.cy])
+                        else:
+                            self.cx = 0
+                    elif code in (575, 336):   # Ctrl+Shift+↓ ou Shift+↓
+                        self._sel_anchor_here()
+                        if self.cy < len(self.lines) - 1:
+                            self.cy += 1
+                            self.cx = 0
+                        else:
+                            self.cx = len(self.lines[self.cy])
                     # Navigation simple (efface la sélection)
                     elif code == curses.KEY_UP:
                         self._sel_clear(); self._move_up()
@@ -2033,10 +2049,12 @@ def main(stdscr):
     # Sur Mac : Ctrl+←/→ est intercepté par macOS ; Terminal.app envoie
     # \033b / \033f (Option+←/→) à la place — on les mappe aux mêmes actions.
     for _seq, _code in [
-        ("\033[1;5D", 546), ("\033[1;5C", 561),   # Ctrl+←/→  (Linux / iTerm2)
-        ("\033b",     546), ("\033f",     561),   # Option+←/→ (Terminal.app Mac)
-        ("\033[1;6D", 580), ("\033[1;6C", 595),   # Ctrl+Shift+←/→ (Linux / iTerm2)
-        ("\033[1;4D", 580), ("\033[1;4C", 595),   # Option+Shift+←/→ (Terminal.app Mac)
+        ("\033[1;5D", 546), ("\033[1;5C", 561),           # Ctrl+←/→
+        ("\033b",     546), ("\033f",     561),           # Option+←/→ (Mac)
+        ("\033[1;6D", 580), ("\033[1;6C", 595),           # Ctrl+Shift+←/→
+        ("\033[1;6A", 570), ("\033[1;6B", 575),           # Ctrl+Shift+↑/↓
+        ("\033[1;4D", 580), ("\033[1;4C", 595),           # Option+Shift+←/→ (Mac)
+        ("\033[1;4A", 570), ("\033[1;4B", 575),           # Option+Shift+↑/↓ (Mac)
     ]:
         try:
             curses.define_key(_seq, _code)
