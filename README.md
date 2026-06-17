@@ -6,6 +6,14 @@ Idéal pour transformer un vieux PC en machine à écrire dédiée.
 
 ---
 
+## Aperçu
+
+![Gestionnaire de projets](docs/projects.png)
+
+[Éditeur](docs/editor.png) · [Navigateur de fichiers](docs/navigator.png) · [Paramètres](docs/settings.png) · [Thème sombre](docs/theme-sombre.png) · [Thème clair](docs/theme-clair.png) · [Thème doux](docs/theme-doux.png)
+
+---
+
 ## Installation
 
 ```bash
