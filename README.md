@@ -159,3 +159,11 @@ Ou manuellement :
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VSerain/distraction-free-write/main/install.sh | sudo bash
 ```
+
+---
+
+## Contribuer
+
+Les issues et les PR sont les bienvenues — qu'il s'agisse de signaler un bug, proposer une idée ou soumettre une amélioration.
+
+Ce projet est développé sur le temps libre, sans engagement commercial. Les contributions sont traitées au fil du temps, sans délai garanti. Merci de votre compréhension.
