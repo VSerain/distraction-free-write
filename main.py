@@ -352,28 +352,27 @@ _ESC_MAP: dict[str, int] = {
     "\033[6~": curses.KEY_NPAGE,
     # Suppr (delete forward)
     "\033[3~": curses.KEY_DC,
-    # Shift + flèches
+    # Shift + flèches (xterm / iTerm2 / Terminal.app)
     "\033[1;2C": curses.KEY_SRIGHT, "\033[2C": curses.KEY_SRIGHT,
     "\033[1;2D": curses.KEY_SLEFT,  "\033[2D": curses.KEY_SLEFT,
+    "\033[1;2A": curses.KEY_SR,     "\033[2A": curses.KEY_SR,
+    "\033[1;2B": curses.KEY_SF,     "\033[2B": curses.KEY_SF,
+    # Shift + flèches style rxvt
+    "\033[a": curses.KEY_SR,
+    "\033[b": curses.KEY_SF,
+    "\033[c": curses.KEY_SRIGHT,
+    "\033[d": curses.KEY_SLEFT,
     # Ctrl + ← / →  (Linux / xterm / iTerm2)
     "\033[1;5D": 546, "\033[5D": 546,
     "\033[1;5C": 561, "\033[5C": 561,
     # Ctrl+Shift + ← / → / ↑ / ↓  (Linux / xterm / iTerm2)
-    "\033[1;6D": 580,
-    "\033[1;6C": 595,
-    "\033[1;6A": 570,   # Ctrl+Shift+↑
-    "\033[1;6B": 575,   # Ctrl+Shift+↓
-    # Shift + ↑ / ↓
-    "\033[1;2A": 337,   # KEY_SR  (Shift+Up)
-    "\033[1;2B": 336,   # KEY_SF  (Shift+Down)
-    # Mac Option + ← / →  (Terminal.app)
-    "\033b": 546,
-    "\033f": 561,
-    # Mac Option+Shift + toutes directions  (Terminal.app)
-    "\033[1;4D": 580,
-    "\033[1;4C": 595,
-    "\033[1;4A": 570,   # Option+Shift+↑
-    "\033[1;4B": 575,   # Option+Shift+↓
+    "\033[1;6D": 580, "\033[1;6C": 595,
+    "\033[1;6A": 570, "\033[1;6B": 575,
+    # Mac Option + ← / →
+    "\033b": 546, "\033f": 561,
+    # Mac Option+Shift + toutes directions
+    "\033[1;4D": 580, "\033[1;4C": 595,
+    "\033[1;4A": 570, "\033[1;4B": 575,
 }
 
 
@@ -1227,16 +1226,24 @@ class Editor:
                     c = ord(ch)
                     if c == 17 or c == 27:   # Ctrl+Q ou ESC
                         break
+                    elif c == 0:             # Ctrl+Space : basculer l'ancre de sélection
+                        if self.sel_anchor is None:
+                            self.sel_anchor = (self.cy, self.cx)
+                        else:
+                            self._sel_clear()
                     elif ch in ("\n", "\r"):
-                        self._sel_clear()
+                        if self.sel_anchor is not None:
+                            self._sel_delete()
                         self._newline(); self._save()
                     elif c in (127, 8):      # Backspace
-                        if self.sel_anchor is not None:
+                        if self._sel_range() is not None:
                             self._sel_delete(); self._save()
                         else:
+                            self._sel_clear()
                             self._backspace(); self._save()
                     elif ch == "\t":
-                        self._sel_clear()
+                        if self.sel_anchor is not None:
+                            self._sel_delete()
                         self._insert("    "); self._save()
                     elif c >= 32:
                         if self.sel_anchor is not None:
@@ -1244,56 +1251,60 @@ class Editor:
                         self._insert(ch); self._save()
 
                 elif code is not None:
-                    # Ctrl+← / Ctrl+→  (début / fin de ligne)
+                    # Ctrl+← / Ctrl+→ : début/fin de ligne (efface la sélection)
                     if code in (546, 543, 545):
                         self._sel_clear(); self.cx = 0
                     elif code in (561, 558, 560):
                         self._sel_clear(); self.cx = len(self.lines[self.cy])
-                    # Ctrl+Shift+←/→/↑/↓ et Shift+←/→ : étendre la sélection
+                    # Shift+←/→ et Ctrl+Shift+←/→ : étendre d'un caractère
                     elif code in (580, 583, 582) or code == curses.KEY_SLEFT:
                         self._sel_anchor_here(); self._move_left()
                     elif code in (595, 598, 597) or code == curses.KEY_SRIGHT:
                         self._sel_anchor_here(); self._move_right()
-                    elif code in (570, 337):   # Ctrl+Shift+↑ ou Shift+↑
+                    # Shift+↑ et Ctrl+Shift+↑ : ancre + fin de ligne du dessus
+                    elif code in (570, curses.KEY_SR):
                         self._sel_anchor_here()
                         if self.cy > 0:
                             self.cy -= 1
                             self.cx = len(self.lines[self.cy])
                         else:
                             self.cx = 0
-                    elif code in (575, 336):   # Ctrl+Shift+↓ ou Shift+↓
+                    # Shift+↓ et Ctrl+Shift+↓ : ancre + début de ligne du dessous
+                    elif code in (575, curses.KEY_SF):
                         self._sel_anchor_here()
                         if self.cy < len(self.lines) - 1:
                             self.cy += 1
                             self.cx = 0
                         else:
                             self.cx = len(self.lines[self.cy])
-                    # Navigation simple (efface la sélection)
+                    # Navigation : étend la sélection si ancre posée, sinon mouvement libre
                     elif code == curses.KEY_UP:
-                        self._sel_clear(); self._move_up()
+                        self._move_up()
                     elif code == curses.KEY_DOWN:
-                        self._sel_clear(); self._move_down()
+                        self._move_down()
                     elif code == curses.KEY_LEFT:
-                        self._sel_clear(); self._move_left()
+                        self._move_left()
                     elif code == curses.KEY_RIGHT:
-                        self._sel_clear(); self._move_right()
+                        self._move_right()
                     elif code == curses.KEY_HOME:
-                        self._sel_clear(); self.cx = 0
+                        self.cx = 0
                     elif code == curses.KEY_END:
-                        self._sel_clear(); self.cx = len(self.lines[self.cy])
+                        self.cx = len(self.lines[self.cy])
                     elif code == curses.KEY_PPAGE:
-                        self._sel_clear(); self._page_up(h)
+                        self._page_up(h)
                     elif code == curses.KEY_NPAGE:
-                        self._sel_clear(); self._page_down(h)
+                        self._page_down(h)
                     elif code == curses.KEY_BACKSPACE:
-                        if self.sel_anchor is not None:
+                        if self._sel_range() is not None:
                             self._sel_delete(); self._save()
                         else:
+                            self._sel_clear()
                             self._backspace(); self._save()
                     elif code == curses.KEY_DC:
-                        if self.sel_anchor is not None:
+                        if self._sel_range() is not None:
                             self._sel_delete(); self._save()
                         else:
+                            self._sel_clear()
                             self._delete(); self._save()
 
         finally:
@@ -2051,6 +2062,10 @@ def main(stdscr):
     for _seq, _code in [
         ("\033[1;5D", 546), ("\033[1;5C", 561),           # Ctrl+←/→
         ("\033b",     546), ("\033f",     561),           # Option+←/→ (Mac)
+        ("\033[1;2D", curses.KEY_SLEFT),                  # Shift+←
+        ("\033[1;2C", curses.KEY_SRIGHT),                 # Shift+→
+        ("\033[1;2A", curses.KEY_SR),                     # Shift+↑
+        ("\033[1;2B", curses.KEY_SF),                     # Shift+↓
         ("\033[1;6D", 580), ("\033[1;6C", 595),           # Ctrl+Shift+←/→
         ("\033[1;6A", 570), ("\033[1;6B", 575),           # Ctrl+Shift+↑/↓
         ("\033[1;4D", 580), ("\033[1;4C", 595),           # Option+Shift+←/→ (Mac)
