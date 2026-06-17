@@ -18,9 +18,9 @@ REPO_RAW="https://raw.githubusercontent.com/VSerain/distraction-free-write/main"
 # ── vérifications préalables ──────────────────────────────────────────────────
 
 echo ""
-echo -e "${BLD}╔════════════════════════════════════════╗${RST}"
-echo -e "${BLD}║       Installation de DistracFreeWrite        ║${RST}"
-echo -e "${BLD}╚════════════════════════════════════════╝${RST}"
+echo -e "${BLD}╔══════════════════════════════════════════════╗${RST}"
+echo -e "${BLD}║     Installation de DistracFreeWrite         ║${RST}"
+echo -e "${BLD}╚══════════════════════════════════════════════╝${RST}"
 echo ""
 
 if [ "$EUID" -ne 0 ]; then
@@ -50,19 +50,24 @@ title "1/4  Dépendances"
 apt-get update -qq
 apt-get install -y \
     python3 \
-    python3-curses \
     curl \
     git \
     network-manager \
     wireless-tools \
-    openssh-client \
-    > /dev/null 2>&1
+    openssh-client
 
 # Vérification Python 3.10+
 if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
     PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
     error "Python 3.10+ requis (installé : $PY_VER)."
     error "Passez à Debian 12 (Bookworm) ou compilez Python manuellement."
+    exit 1
+fi
+
+# Vérification curses (inclus dans python3 sur Debian, mais absent sur certains systèmes minimaux)
+if ! python3 -c "import curses" 2>/dev/null; then
+    error "Le module Python 'curses' est manquant."
+    error "Essayez : apt-get install -y python3-dev libncursesw5-dev"
     exit 1
 fi
 
