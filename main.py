@@ -1338,23 +1338,23 @@ class Editor:
                             self.cx = 0
                         else:
                             self.cx = len(self.lines[self.cy])
-                    # Navigation : étend la sélection si ancre posée, sinon mouvement libre
+                    # Navigation simple : efface la sélection et déplace
                     elif code == curses.KEY_UP:
-                        self._move_up()
+                        self._sel_clear(); self._move_up()
                     elif code == curses.KEY_DOWN:
-                        self._move_down()
+                        self._sel_clear(); self._move_down()
                     elif code == curses.KEY_LEFT:
-                        self._move_left()
+                        self._sel_clear(); self._move_left()
                     elif code == curses.KEY_RIGHT:
-                        self._move_right()
+                        self._sel_clear(); self._move_right()
                     elif code == curses.KEY_HOME:
-                        self.cx = 0
+                        self._sel_clear(); self.cx = 0
                     elif code == curses.KEY_END:
-                        self.cx = len(self.lines[self.cy])
+                        self._sel_clear(); self.cx = len(self.lines[self.cy])
                     elif code == curses.KEY_PPAGE:
-                        self._page_up(h)
+                        self._sel_clear(); self._page_up(h)
                     elif code == curses.KEY_NPAGE:
-                        self._page_down(h)
+                        self._sel_clear(); self._page_down(h)
                     elif code == curses.KEY_BACKSPACE:
                         if self._sel_range() is not None:
                             self._sel_delete(); self._save()
