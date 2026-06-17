@@ -43,9 +43,12 @@ def _apply_theme(stdscr):
             curses.init_color(8, 973, 941, 863)   # fond crème
             curses.init_color(9, 239, 208, 188)   # texte brun-gris
             curses.init_pair(1, 9, 8)
+        elif curses.can_change_color():
+            # TTY 8 couleurs : redéfinir le jaune (3) en crème, jamais de bleu/rose
+            curses.init_color(3, 973, 941, 863)
+            curses.init_pair(1, curses.COLOR_BLACK, 3)
         else:
-            # Fallback TTY 8 couleurs : noir sur blanc, neutre et lisible
-            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
+            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_YELLOW)
         stdscr.bkgd(" ", curses.color_pair(1))
     else:
         curses.init_pair(1, -1, -1)
