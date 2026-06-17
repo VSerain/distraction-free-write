@@ -1867,6 +1867,18 @@ def settings_screen(stdscr):
     return False
 
 
+def _poweroff(stdscr):
+    if not confirm(stdscr, "Eteindre l'ordinateur ?"):
+        return
+    curses.endwin()
+    for cmd in [["systemctl", "poweroff"], ["poweroff"], ["sudo", "shutdown", "-h", "now"]]:
+        try:
+            subprocess.run(cmd, timeout=5)
+            break
+        except Exception:
+            continue
+
+
 def home_screen(stdscr):
     """Écran d'accueil : logo centré + projets + menu."""
     sel = 0
@@ -1875,7 +1887,7 @@ def home_screen(stdscr):
     while True:
         projects = sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir())
         n = len(projects)
-        total = n + 2   # n projets + Nouveau + Paramètres
+        total = n + 3   # n projets + Nouveau + Paramètres + Eteindre
         sel = clamp(sel, 0, total - 1)
 
         h, w = stdscr.getmaxyx()
@@ -1947,6 +1959,7 @@ def home_screen(stdscr):
         menu_items = [
             (n,     "  +  Nouveau projet"),
             (n + 1, "  *  Parametres"),
+            (n + 2, "  o  Eteindre l'ordinateur"),
         ]
         for item_idx, label in menu_items:
             if row >= h - 1:
@@ -1997,6 +2010,8 @@ def home_screen(stdscr):
             elif sel == n + 1:
                 if settings_screen(stdscr):
                     return
+            elif sel == n + 2:
+                _poweroff(stdscr)
         elif k == "x" and sel < n:
             to_del = projects[sel]
             if confirm(stdscr, f"Supprimer le projet \"{to_del.name}\" et tout son contenu ?"):
