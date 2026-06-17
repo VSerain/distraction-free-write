@@ -1,4 +1,4 @@
-# Freewrite
+# DistracFreeWrite
 
 Un environnement d'écriture minimaliste pour terminal, conçu pour tourner sur un PC Debian sans interface graphique. Pas de souris, pas de notifications, pas de distractions — uniquement le texte.
 
@@ -20,12 +20,12 @@ Idéal pour transformer un vieux PC en machine à écrire dédiée.
 curl -fsSL https://raw.githubusercontent.com/VSerain/distraction-free-write/main/install.sh | sudo bash
 ```
 
-Le script installe les dépendances, copie l'application dans `/opt/freewrite` et propose d'activer le démarrage automatique au boot (connexion automatique sur TTY1).
+Le script installe les dépendances, copie l'application dans `/opt/distracfreewrite` et propose d'activer le démarrage automatique au boot (connexion automatique sur TTY1).
 
 Une fois installé :
 
 ```bash
-freewrite
+distracfreewrite
 ```
 
 ### Prérequis
@@ -111,9 +111,9 @@ Accessible depuis l'écran d'accueil.
 | WiFi off hors git | on / off | Coupe le WiFi en permanence sauf pendant les opérations Git et les mises à jour |
 | Connexion WiFi | — | Scanner et se connecter à un réseau |
 | Mise à jour | — | Télécharger et installer la dernière version depuis GitHub |
-| Démarrage automatique | on / off | Lancer Freewrite automatiquement au démarrage du PC |
+| Démarrage automatique | on / off | Lancer DistracFreeWrite automatiquement au démarrage du PC |
 
-Pour quitter l'application et revenir au terminal : **Paramètres → Fermer Freewrite**.
+Pour quitter l'application et revenir au terminal : **Paramètres → Fermer DistracFreeWrite**.
 
 ---
 
@@ -130,7 +130,7 @@ Pour quitter l'application et revenir au terminal : **Paramètres → Fermer Fre
 Affiché dans la barre de titre (sauf dans l'éditeur) :
 
 ```
-FREEWRITE  —  Mon projet          78%+   WiFi:MaBox
+DISTRACFREEWRITE  —  Mon projet          78%+   WiFi:MaBox
 ```
 
 - `78%` — batterie, `+` si en charge
@@ -146,10 +146,10 @@ FREEWRITE  —  Mon projet          78%+   WiFi:MaBox
         chapitre-1.txt
         notes/
 
-~/.config/freewrite/
+~/.config/distracfreewrite/
     config.json              ← préférences (thème, marges, WiFi…)
 
-/opt/freewrite/
+/opt/distracfreewrite/
     main.py                  ← application
 
 ~/.ssh/

@@ -19,7 +19,7 @@ REPO_RAW="https://raw.githubusercontent.com/VSerain/distraction-free-write/main"
 
 echo ""
 echo -e "${BLD}╔════════════════════════════════════════╗${RST}"
-echo -e "${BLD}║       Installation de Freewrite        ║${RST}"
+echo -e "${BLD}║       Installation de DistracFreeWrite        ║${RST}"
 echo -e "${BLD}╚════════════════════════════════════════╝${RST}"
 echo ""
 
@@ -75,7 +75,7 @@ info "wireless-tools, openssh-client"
 
 title "2/4  Installation de l'application"
 
-INSTALL_DIR="/opt/freewrite"
+INSTALL_DIR="/opt/distracfreewrite"
 mkdir -p "$INSTALL_DIR"
 
 # Récupérer la version (dernier tag GitHub)
@@ -92,25 +92,25 @@ chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
 info "Application installée dans $INSTALL_DIR  ($LATEST_TAG)"
 
 # Lanceur global
-cat > /usr/local/bin/freewrite << 'EOF'
+cat > /usr/local/bin/distracfreewrite << 'EOF'
 #!/bin/bash
-exec python3 /opt/freewrite/main.py
+exec python3 /opt/distracfreewrite/main.py
 EOF
-chmod 755 /usr/local/bin/freewrite
-info "Commande 'freewrite' disponible globalement"
+chmod 755 /usr/local/bin/distracfreewrite
+info "Commande 'distracfreewrite' disponible globalement"
 
 # Dossiers utilisateur
 mkdir -p "$REAL_HOME/Projets"
 chown "$REAL_USER:$REAL_USER" "$REAL_HOME/Projets"
-mkdir -p "$REAL_HOME/.config/freewrite"
-chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/freewrite"
-info "Dossiers ~/Projets et ~/.config/freewrite créés"
+mkdir -p "$REAL_HOME/.config/distracfreewrite"
+chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/distracfreewrite"
+info "Dossiers ~/Projets et ~/.config/distracfreewrite créés"
 
 # ── démarrage automatique ─────────────────────────────────────────────────────
 
 title "3/4  Démarrage automatique"
 echo ""
-echo -e "  Voulez-vous que Freewrite se lance automatiquement"
+echo -e "  Voulez-vous que DistracFreeWrite se lance automatiquement"
 echo -e "  au démarrage du PC (connexion automatique sur TTY1) ?"
 echo ""
 printf "  [o/N] > "
@@ -139,14 +139,14 @@ PFEOF
         chown "$REAL_USER:$REAL_USER" "$PROFILE"
     fi
 
-    if grep -q "freewrite" "$PROFILE" 2>/dev/null; then
+    if grep -q "distracfreewrite" "$PROFILE" 2>/dev/null; then
         warn "Démarrage déjà présent dans $PROFILE, ignoré."
     else
         cat >> "$PROFILE" << 'PFEOF'
 
-# Lancer Freewrite automatiquement sur TTY1
+# Lancer DistracFreeWrite automatiquement sur TTY1
 if [ "$(tty)" = "/dev/tty1" ]; then
-    freewrite
+    distracfreewrite
 fi
 PFEOF
         chown "$REAL_USER:$REAL_USER" "$PROFILE"
@@ -164,10 +164,10 @@ fi
 
 title "4/4  Terminé"
 echo ""
-echo -e "  Application    ${GRN}/opt/freewrite/main.py${RST}"
-echo -e "  Commande       ${GRN}freewrite${RST}"
+echo -e "  Application    ${GRN}/opt/distracfreewrite/main.py${RST}"
+echo -e "  Commande       ${GRN}distracfreewrite${RST}"
 echo -e "  Projets        ${GRN}$REAL_HOME/Projets${RST}"
-echo -e "  Configuration  ${GRN}$REAL_HOME/.config/freewrite/config.json${RST}"
+echo -e "  Configuration  ${GRN}$REAL_HOME/.config/distracfreewrite/config.json${RST}"
 echo -e "  Version        ${GRN}$LATEST_TAG${RST}"
 echo ""
 
@@ -175,6 +175,6 @@ if [[ "$AUTOSTART" =~ ^[oOyY]$ ]]; then
     echo -e "  ${GRN}Démarrage automatique activé.${RST}"
     echo -e "  Redémarrez le PC pour que les changements prennent effet."
 else
-    echo -e "  Tapez ${BLD}freewrite${RST} pour lancer l'application."
+    echo -e "  Tapez ${BLD}distracfreewrite${RST} pour lancer l'application."
 fi
 echo ""

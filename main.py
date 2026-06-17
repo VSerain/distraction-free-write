@@ -12,7 +12,7 @@ from pathlib import Path
 locale.setlocale(locale.LC_ALL, "")
 
 PROJECTS_DIR  = Path.home() / "Projets"
-_CONFIG_FILE  = Path.home() / ".config" / "freewrite" / "config.json"
+_CONFIG_FILE  = Path.home() / ".config" / "distracfreewrite" / "config.json"
 _settings: dict = {"theme": "dark"}
 
 
@@ -134,7 +134,7 @@ def topbar(stdscr, text: str, status: bool = True):
         right = ("   ".join(parts) + "  ") if parts else ""
     else:
         right = ""
-    title  = f"  FREEWRITE  —  {text}"
+    title  = f"  DISTRACFREEWRITE  —  {text}"
     avail  = max(0, w - 1 - len(right))
     line   = title[:avail].ljust(avail) + right
     try:
@@ -1675,15 +1675,15 @@ def browse_screen(stdscr, directory: Path, is_project_root: bool = False,
 # ── logo ASCII art ───────────────────────────────────────────────────────────
 
 _LOGO = [
-    r"  ___  ___  ___ ___ _ _ ___ ___ _____ ___ ",
-    r" | __|| _ \| __| __| | | _ \_ _|_   _| __|",
-    r" | _| |   /| _|| _|| | |   /| |  | | | _| ",
-    r" |_|  |_|_\|___|___|\_/|_|_\__|  |_| |___|",
+    r" ___  _    _               ___          __      __   _ _       ",
+    r"|   \(_)__| |_ _ _ __ _ __| __| _ ___ __\ \    / / _(_) |_ ___ ",
+    r"| |) | (_-<  _| '_/ _` / _| _| '_/ -_) -_) \/\/ / '_| |  _/ -_)",
+    r"|___/|_/__/\__|_| \__,_\__|_||_| \___\___|\_/\_/|_| |_|\__\___|",
 ]
 _TAGLINE = "ecrire, sans distraction"
 
 _GITHUB_REPO = "VSerain/distraction-free-write"
-_INSTALL_PATH = Path("/opt/freewrite/main.py")
+_INSTALL_PATH = Path("/opt/distracfreewrite/main.py")
 
 
 # ── mise à jour et démarrage auto ────────────────────────────────────────────
@@ -1736,7 +1736,7 @@ def _update_app(stdscr):
 
     _loader(stdscr, f"Telechargement de {tag}...")
     url = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/{tag}/main.py"
-    tmp = Path("/tmp/freewrite_update.py")
+    tmp = Path("/tmp/distracfreewrite_update.py")
     try:
         r = subprocess.run(["curl", "-fsSL", url, "-o", str(tmp)],
                            capture_output=True, text=True, timeout=30)
@@ -1770,7 +1770,7 @@ def _update_app(stdscr):
 
 def _is_autostart_enabled() -> bool:
     profile = Path.home() / ".bash_profile"
-    return profile.exists() and "freewrite" in profile.read_text()
+    return profile.exists() and "distracfreewrite" in profile.read_text()
 
 
 def _toggle_autostart(stdscr):
@@ -1780,7 +1780,7 @@ def _toggle_autostart(stdscr):
             return
         text = profile.read_text()
         text = re.sub(
-            r"\n# Lancer Freewrite automatiquement.*?fi\n",
+            r"\n# Lancer DistracFreeWrite automatiquement.*?fi\n",
             "\n",
             text,
             flags=re.DOTALL,
@@ -1794,9 +1794,9 @@ def _toggle_autostart(stdscr):
             profile.write_text("# ~/.bash_profile\n[[ -f ~/.bashrc ]] && source ~/.bashrc\n")
         with open(profile, "a") as f:
             f.write(
-                "\n# Lancer Freewrite automatiquement sur TTY1\n"
+                "\n# Lancer DistracFreeWrite automatiquement sur TTY1\n"
                 'if [ "$(tty)" = "/dev/tty1" ]; then\n'
-                "    freewrite\n"
+                "    distracfreewrite\n"
                 "fi\n"
             )
         _flash(stdscr, "Demarrage automatique active")
@@ -1974,7 +1974,7 @@ def settings_screen(stdscr):
         _item(row, AUTO_IDX, f"Demarrage automatique : {auto_state}");  row += 2
 
         _sep(row);  row += 2
-        _item(row, QUIT_IDX, "Fermer Freewrite  —  retourner au terminal")
+        _item(row, QUIT_IDX, "Fermer DistracFreeWrite  —  retourner au terminal")
 
         bottombar(stdscr, "  haut/bas Naviguer   -> Appliquer / Ouvrir   <- Retour")
         stdscr.refresh()
@@ -2011,7 +2011,7 @@ def settings_screen(stdscr):
             elif sel == AUTO_IDX:
                 _toggle_autostart(stdscr)
             elif sel == QUIT_IDX:
-                if confirm(stdscr, "Fermer Freewrite et revenir au terminal ?"):
+                if confirm(stdscr, "Fermer DistracFreeWrite et revenir au terminal ?"):
                     return True
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             if sel == MARGIN_IDX:
