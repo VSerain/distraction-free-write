@@ -861,6 +861,7 @@ def _pick_branch(stdscr, branches: list[str]) -> str | None:
 
 
 _GIT_ACTIONS = [
+    ("diff",    "Voir les modifications en cours"),
     ("commit",  "Commiter les modifications"),
     ("push",    "Pousser vers le remote  (push)"),
     ("pull",    "Récupérer depuis le remote  (pull)"),
@@ -884,6 +885,12 @@ def _git_exec(stdscr, project_path: Path, action: str, remote: str) -> str | Non
         if not ok:
             return _err(stdscr, "git init", out)
         return "✓ Dépôt Git initialisé"
+
+    if action == "diff":
+        _, out = _git(project_path, "diff", "HEAD")
+        lines = out.splitlines() or ["(aucune modification par rapport au dernier commit)"]
+        _text_page(stdscr, f"Modifications en cours — {project_path.name}", lines)
+        return None
 
     if action == "commit":
         if not git_has_changes(project_path):
@@ -1103,14 +1110,47 @@ def _git_page_inner(stdscr, project_path: Path):
 
 # ── éditeur de texte ─────────────────────────────────────────────────────────
 
+def _wrap_segs(text: str, width: int) -> "list[tuple[int,int]]":
+    """Word-wrap. Retourne (start, end) pour chaque ligne visuelle."""
+    if width <= 0 or not text:
+        return [(0, len(text))]
+    segs: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if i + width >= n:
+            segs.append((i, n))
+            break
+        k = text.rfind(' ', i, i + width)
+        if k > i:
+            segs.append((i, k + 1))   # inclut l'espace final
+            i = k + 1
+        else:
+            segs.append((i, i + width))
+            i += width
+    return segs or [(0, 0)]
+
+
+def _cx_to_vrc(segs: "list[tuple[int,int]]", cx: int) -> "tuple[int,int]":
+    """Convertit un offset fichier cx en (ligne_visuelle, colonne_visuelle)."""
+    n = len(segs)
+    for i, (s, e) in enumerate(segs):
+        if i < n - 1:
+            if s <= cx < e:
+                return i, cx - s
+        else:
+            if s <= cx <= e:
+                return i, cx - s
+    return n - 1, max(0, cx - segs[-1][0])
+
+
 class Editor:
     def __init__(self, filepath: Path):
         self.filepath = filepath
         self.lines: list[str] = []
         self.cy = 0
         self.cx = 0
-        self.oy = 0
-        self.ox = 0
+        self.ovy = 0   # premier rang visuel visible (remplace oy)
+        self._dw = 80  # largeur d'affichage utile (mis à jour par _scroll)
         self.sel_anchor: "tuple[int,int] | None" = None
         self._load()
 
@@ -1163,44 +1203,72 @@ class Editor:
 
     # ── affichage ─────────────────────────────────────────────────────────────
 
-    def _draw_line(self, stdscr, screen_row: int, line_idx: int, w: int):
-        if line_idx >= len(self.lines):
-            return
-        line    = self.lines[line_idx]
-        visible = line[self.ox:self.ox + w - 1]
-        rng     = self._sel_range()
+    def _total_vrows_before(self, line_idx: int) -> int:
+        total = 0
+        for i in range(line_idx):
+            total += len(_wrap_segs(self.lines[i], self._dw))
+        return total
 
-        if rng is None:
-            try:
-                stdscr.addstr(screen_row, 0, visible)
-            except curses.error:
-                pass
-            return
+    def _render(self, stdscr, h: int, w: int):
+        margin = _settings.get("margin", 1)
+        sel_rng = self._sel_range()
+        stdscr.erase()
 
-        (r1, c1), (r2, c2) = rng
-        if line_idx < r1 or line_idx > r2:
-            try:
-                stdscr.addstr(screen_row, 0, visible)
-            except curses.error:
-                pass
-            return
+        # Trouver le fichier-ligne et rang-dans-ligne de ovy
+        vrow = 0
+        start_fl, start_ril = 0, 0
+        for fl in range(len(self.lines)):
+            segs = _wrap_segs(self.lines[fl], self._dw)
+            nrows = len(segs)
+            if vrow + nrows > self.ovy:
+                start_fl = fl
+                start_ril = self.ovy - vrow
+                break
+            vrow += nrows
 
-        sel_a = c1 if line_idx == r1 else 0
-        sel_b = c2 if line_idx == r2 else len(line)
+        # Dessiner h lignes visuelles
+        screen_row = 0
+        fl, ril_begin = start_fl, start_ril
+        while screen_row < h and fl < len(self.lines):
+            segs = _wrap_segs(self.lines[fl], self._dw)
+            for ril in range(ril_begin, len(segs)):
+                if screen_row >= h:
+                    break
+                s, e = segs[ril]
+                chunk = self.lines[fl][s:e]
+                if sel_rng is None:
+                    try:
+                        stdscr.addstr(screen_row, margin, chunk)
+                    except curses.error:
+                        pass
+                else:
+                    (r1, c1), (r2, c2) = sel_rng
+                    for ci, ch in enumerate(chunk):
+                        fc = s + ci
+                        in_sel = (
+                            (r1 < fl < r2) or
+                            (fl == r1 == r2 and c1 <= fc < c2) or
+                            (fl == r1 and fl < r2 and fc >= c1) or
+                            (fl == r2 and fl > r1 and fc < c2)
+                        )
+                        try:
+                            stdscr.addch(screen_row, margin + ci, ch,
+                                         curses.A_REVERSE if in_sel else 0)
+                        except curses.error:
+                            pass
+                screen_row += 1
+            fl += 1
+            ril_begin = 0
 
-        def vis(col):
-            return max(0, min(col - self.ox, len(visible)))
-
-        va, vb = vis(sel_a), vis(sel_b)
+        # Position du curseur
+        cy_segs = _wrap_segs(self.lines[self.cy], self._dw)
+        cursor_ril, cursor_col = _cx_to_vrc(cy_segs, self.cx)
+        cursor_vrow = self._total_vrows_before(self.cy) + cursor_ril
         try:
-            if va > 0:
-                stdscr.addstr(screen_row, 0,  visible[:va])
-            if va < vb:
-                stdscr.addstr(screen_row, va, visible[va:vb], curses.A_REVERSE)
-            if vb < len(visible):
-                stdscr.addstr(screen_row, vb, visible[vb:])
+            stdscr.move(cursor_vrow - self.ovy, margin + cursor_col)
         except curses.error:
             pass
+        stdscr.refresh()
 
     def run(self, stdscr):
         prev_curs = curses.curs_set(1)
@@ -1211,14 +1279,7 @@ class Editor:
                 h, w = stdscr.getmaxyx()
                 self._scroll(h, w)
 
-                stdscr.erase()
-                for row in range(h):
-                    self._draw_line(stdscr, row, self.oy + row, w)
-                try:
-                    stdscr.move(self.cy - self.oy, self.cx - self.ox)
-                except curses.error:
-                    pass
-                stdscr.refresh()
+                self._render(stdscr, h, w)
 
                 ch, code = next_key(stdscr)
 
@@ -1310,26 +1371,45 @@ class Editor:
         finally:
             curses.curs_set(prev_curs)
 
-    def _scroll(self, h, w):
-        content_h = h
-        if self.cy < self.oy:
-            self.oy = self.cy
-        elif self.cy >= self.oy + content_h:
-            self.oy = self.cy - content_h + 1
-        if self.cx < self.ox:
-            self.ox = self.cx
-        elif self.cx >= self.ox + w:
-            self.ox = self.cx - w + 1
+    def _scroll(self, h: int, w: int):
+        margin = _settings.get("margin", 1)
+        self._dw = max(1, w - 2 * margin)
+        cy_segs = _wrap_segs(self.lines[self.cy], self._dw)
+        ril, _ = _cx_to_vrc(cy_segs, self.cx)
+        vrow_cursor = self._total_vrows_before(self.cy) + ril
+        if vrow_cursor < self.ovy:
+            self.ovy = vrow_cursor
+        elif vrow_cursor >= self.ovy + h:
+            self.ovy = vrow_cursor - h + 1
 
     def _move_up(self):
-        if self.cy > 0:
+        dw = self._dw
+        segs = _wrap_segs(self.lines[self.cy], dw)
+        ril, col = _cx_to_vrc(segs, self.cx)
+        if ril > 0:
+            ps, pe = segs[ril - 1]
+            is_last = (ril - 1 == len(segs) - 1)
+            self.cx = min(ps + col, pe if is_last else pe - 1)
+        elif self.cy > 0:
             self.cy -= 1
-            self.cx = min(self.cx, len(self.lines[self.cy]))
+            prev = _wrap_segs(self.lines[self.cy], dw)
+            ps, pe = prev[-1]
+            self.cx = min(ps + col, pe)
 
     def _move_down(self):
-        if self.cy < len(self.lines) - 1:
+        dw = self._dw
+        segs = _wrap_segs(self.lines[self.cy], dw)
+        ril, col = _cx_to_vrc(segs, self.cx)
+        if ril < len(segs) - 1:
+            ns, ne = segs[ril + 1]
+            is_last = (ril + 1 == len(segs) - 1)
+            self.cx = min(ns + col, ne if is_last else ne - 1)
+        elif self.cy < len(self.lines) - 1:
             self.cy += 1
-            self.cx = min(self.cx, len(self.lines[self.cy]))
+            nxt = _wrap_segs(self.lines[self.cy], dw)
+            ns, ne = nxt[0]
+            is_last = (len(nxt) == 1)
+            self.cx = min(ns + col, ne if is_last else ne - 1)
 
     def _move_left(self):
         if self.cx > 0:
@@ -1345,13 +1425,37 @@ class Editor:
             self.cy += 1
             self.cx = 0
 
-    def _page_up(self, h):
-        self.cy = max(0, self.cy - h)
-        self.cx = min(self.cx, len(self.lines[self.cy]))
+    def _vrow_seek(self, target: int, col: int):
+        """Déplace le curseur vers le rang visuel 'target' en gardant la colonne."""
+        acc = 0
+        for i, line in enumerate(self.lines):
+            segs = _wrap_segs(line, self._dw)
+            nrows = len(segs)
+            if acc + nrows > target:
+                t_ril = target - acc
+                ps, pe = segs[t_ril]
+                is_last = (t_ril == nrows - 1)
+                self.cy = i
+                self.cx = min(ps + col, pe if is_last else pe - 1)
+                return
+            acc += nrows
+        self.cy = len(self.lines) - 1
+        self.cx = len(self.lines[self.cy])
 
-    def _page_down(self, h):
-        self.cy = min(len(self.lines) - 1, self.cy + h)
-        self.cx = min(self.cx, len(self.lines[self.cy]))
+    def _page_up(self, h: int):
+        dw = self._dw
+        segs = _wrap_segs(self.lines[self.cy], dw)
+        ril, col = _cx_to_vrc(segs, self.cx)
+        vrow = self._total_vrows_before(self.cy) + ril
+        self._vrow_seek(max(0, vrow - h), col)
+
+    def _page_down(self, h: int):
+        dw = self._dw
+        segs = _wrap_segs(self.lines[self.cy], dw)
+        ril, col = _cx_to_vrc(segs, self.cx)
+        total = sum(len(_wrap_segs(l, dw)) for l in self.lines)
+        vrow = self._total_vrows_before(self.cy) + ril
+        self._vrow_seek(min(total - 1, vrow + h), col)
 
     def _backspace(self):
         if self.cx > 0:
@@ -1784,12 +1888,13 @@ def settings_screen(stdscr):
         ("light", "Clair"),
         ("sepia", "Doux  —  confort visuel (fond creme, texte brun-gris)"),
     ]
-    WIFI_IDX      = len(_THEMES)          # 3
-    WIFI_OFF_IDX  = len(_THEMES) + 1      # 4
-    UPDATE_IDX    = len(_THEMES) + 2      # 5
-    AUTO_IDX      = len(_THEMES) + 3      # 6
-    QUIT_IDX      = len(_THEMES) + 4      # 7
-    TOTAL         = len(_THEMES) + 5      # 8
+    MARGIN_IDX    = len(_THEMES)           # 3
+    WIFI_IDX      = len(_THEMES) + 1      # 4
+    WIFI_OFF_IDX  = len(_THEMES) + 2      # 5
+    UPDATE_IDX    = len(_THEMES) + 3      # 6
+    AUTO_IDX      = len(_THEMES) + 4      # 7
+    QUIT_IDX      = len(_THEMES) + 5      # 8
+    TOTAL         = len(_THEMES) + 6      # 9
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -1834,6 +1939,13 @@ def settings_screen(stdscr):
 
         row += 1;  _sep(row);  row += 2
 
+        # ── Editeur ──
+        _heading(row, "Editeur");  row += 2
+        m = _settings.get("margin", 1)
+        _item(row, MARGIN_IDX, f"Marge laterale :  [{max(0,m-1)}] {m} [{m+1}]  (← / →)");  row += 2
+
+        _sep(row);  row += 2
+
         # ── Reseau ──
         _heading(row, "Reseau");  row += 2
         ssid  = _sys_cache.get("wifi", "")
@@ -1868,6 +1980,9 @@ def settings_screen(stdscr):
                 _settings["theme"] = key
                 _save_settings()
                 _apply_theme(stdscr)
+            elif sel == MARGIN_IDX:
+                _settings["margin"] = min(8, _settings.get("margin", 1) + 1)
+                _save_settings()
             elif sel == WIFI_IDX:
                 if _settings.get("wifi_off", False):
                     _wifi_set_radio(True)
@@ -1886,7 +2001,11 @@ def settings_screen(stdscr):
                 if confirm(stdscr, "Fermer Freewrite et revenir au terminal ?"):
                     return True
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
-            return False
+            if sel == MARGIN_IDX:
+                _settings["margin"] = max(0, _settings.get("margin", 1) - 1)
+                _save_settings()
+            else:
+                return False
 
     return False
 
