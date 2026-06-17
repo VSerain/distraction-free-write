@@ -1206,13 +1206,10 @@ class Editor:
                 self._scroll(h, w)
 
                 stdscr.erase()
-                topbar(stdscr, self.filepath.name, status=False)
-                for row in range(h - 2):
-                    self._draw_line(stdscr, row + 1, self.oy + row, w)
-                sel_hint = "  [selection]  Backspace suppr" if self.sel_anchor is not None else ""
-                bottombar(stdscr, f"  L{self.cy + 1}:{self.cx + 1}{sel_hint}   Ctrl+Q Quitter")
+                for row in range(h):
+                    self._draw_line(stdscr, row, self.oy + row, w)
                 try:
-                    stdscr.move(self.cy - self.oy + 1, self.cx - self.ox)
+                    stdscr.move(self.cy - self.oy, self.cx - self.ox)
                 except curses.error:
                     pass
                 stdscr.refresh()
@@ -1287,7 +1284,7 @@ class Editor:
             curses.curs_set(prev_curs)
 
     def _scroll(self, h, w):
-        content_h = h - 2
+        content_h = h
         if self.cy < self.oy:
             self.oy = self.cy
         elif self.cy >= self.oy + content_h:
@@ -1322,11 +1319,11 @@ class Editor:
             self.cx = 0
 
     def _page_up(self, h):
-        self.cy = max(0, self.cy - (h - 2))
+        self.cy = max(0, self.cy - h)
         self.cx = min(self.cx, len(self.lines[self.cy]))
 
     def _page_down(self, h):
-        self.cy = min(len(self.lines) - 1, self.cy + (h - 2))
+        self.cy = min(len(self.lines) - 1, self.cy + h)
         self.cx = min(self.cx, len(self.lines[self.cy]))
 
     def _backspace(self):
