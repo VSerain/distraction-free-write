@@ -99,6 +99,26 @@ def _is_wifi_connected() -> bool:
     return bool(_read_wifi_ssid())
 
 
+def _is_network_connected() -> bool:
+    """True si une connexion réseau est active (WiFi ou Ethernet)."""
+    if shutil.which("nmcli"):
+        try:
+            r = subprocess.run(
+                ["nmcli", "-t", "-f", "STATE", "general"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if "connected" in r.stdout.lower():
+                return True
+        except Exception:
+            pass
+    try:
+        r = subprocess.run(["ip", "route", "show", "default"],
+                           capture_output=True, text=True, timeout=2)
+        return bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
 def _wifi_set_radio(on: bool):
     if not shutil.which("nmcli"):
         return
@@ -122,7 +142,12 @@ def _refresh_sys_status():
         _sys_cache["wifi"] = "WiFi:OFF"
     else:
         ssid = _read_wifi_ssid()
-        _sys_cache["wifi"] = f"WiFi:{ssid}" if ssid else "WiFi:--"
+        if ssid:
+            _sys_cache["wifi"] = f"WiFi:{ssid}"
+        elif _is_network_connected():
+            _sys_cache["wifi"] = "ETH"
+        else:
+            _sys_cache["wifi"] = "WiFi:--"
 
 
 # ── utilitaires écran ────────────────────────────────────────────────────────
@@ -998,15 +1023,15 @@ def git_page(stdscr, project_path: Path):
         _wait_wifi_up(stdscr)
 
     # Toujours pas connecté → écran de connexion WiFi
-    if not _is_wifi_connected():
+    if not _is_network_connected():
         _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
         _wifi_connect_screen(stdscr)
 
     # Dernier contrôle — si l'utilisateur a annulé sans se connecter
-    if not _is_wifi_connected():
+    if not _is_network_connected():
         if _wifi_managed:
             _wifi_set_radio(False)
-        _flash(stdscr, "Git necessite une connexion WiFi.")
+        _flash(stdscr, "Git necessite une connexion reseau.")
         return
 
     try:
@@ -1713,14 +1738,14 @@ def _update_app(stdscr):
         _wifi_set_radio(True)
         _wait_wifi_up(stdscr)
 
-    if not _is_wifi_connected():
+    if not _is_network_connected():
         _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
         _wifi_connect_screen(stdscr)
 
-    if not _is_wifi_connected():
+    if not _is_network_connected():
         if _wifi_managed:
             _wifi_set_radio(False)
-        _flash(stdscr, "La mise a jour necessite une connexion WiFi.")
+        _flash(stdscr, "La mise a jour necessite une connexion reseau.")
         return
 
     _loader(stdscr, "Recherche de la derniere version...")
