@@ -1785,11 +1785,15 @@ def _update_app(stdscr):
         shutil.copy2(tmp, _INSTALL_PATH)
         _settings["version"] = tag
         _save_settings()
-        _text_page(stdscr, "Mise a jour reussie", [
-            f"Version {tag} installee.",
-            "",
-            "Quittez et relancez l'application pour appliquer.",
-        ])
+        if confirm(stdscr, f"Version {tag} installee. Redemarrer le systeme maintenant ?"):
+            curses.endwin()
+            subprocess.run(["systemctl", "reboot"], check=False)
+        else:
+            _text_page(stdscr, "Mise a jour reussie", [
+                f"Version {tag} installee.",
+                "",
+                "Quittez et relancez l'application pour appliquer.",
+            ])
     except Exception as e:
         _text_page(stdscr, "Erreur", [str(e)])
     finally:
