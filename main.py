@@ -1151,6 +1151,7 @@ class Editor:
         self.cx = 0
         self.ovy = 0   # premier rang visuel visible (remplace oy)
         self._dw = 80  # largeur d'affichage utile (mis à jour par _scroll)
+        self._mv = 1   # marge verticale (mis à jour par _scroll)
         self.sel_anchor: "tuple[int,int] | None" = None
         self._load()
 
@@ -1210,7 +1211,9 @@ class Editor:
         return total
 
     def _render(self, stdscr, h: int, w: int):
-        margin = _settings.get("margin", 1)
+        margin  = _settings.get("margin",   1)
+        mv      = self._mv
+        max_row = h - mv          # première ligne après la zone de texte
         sel_rng = self._sel_range()
         stdscr.erase()
 
@@ -1226,13 +1229,13 @@ class Editor:
                 break
             vrow += nrows
 
-        # Dessiner h lignes visuelles
-        screen_row = 0
+        # Dessiner les lignes visuelles dans la zone [mv, max_row)
+        screen_row = mv
         fl, ril_begin = start_fl, start_ril
-        while screen_row < h and fl < len(self.lines):
+        while screen_row < max_row and fl < len(self.lines):
             segs = _wrap_segs(self.lines[fl], self._dw)
             for ril in range(ril_begin, len(segs)):
-                if screen_row >= h:
+                if screen_row >= max_row:
                     break
                 s, e = segs[ril]
                 chunk = self.lines[fl][s:e]
@@ -1265,7 +1268,7 @@ class Editor:
         cursor_ril, cursor_col = _cx_to_vrc(cy_segs, self.cx)
         cursor_vrow = self._total_vrows_before(self.cy) + cursor_ril
         try:
-            stdscr.move(cursor_vrow - self.ovy, margin + cursor_col)
+            stdscr.move(mv + cursor_vrow - self.ovy, margin + cursor_col)
         except curses.error:
             pass
         stdscr.refresh()
@@ -1372,15 +1375,17 @@ class Editor:
             curses.curs_set(prev_curs)
 
     def _scroll(self, h: int, w: int):
-        margin = _settings.get("margin", 1)
+        margin   = _settings.get("margin",   1)
+        self._mv = _settings.get("margin_v", 1)
         self._dw = max(1, w - 2 * margin)
+        content_h = max(1, h - 2 * self._mv)
         cy_segs = _wrap_segs(self.lines[self.cy], self._dw)
         ril, _ = _cx_to_vrc(cy_segs, self.cx)
         vrow_cursor = self._total_vrows_before(self.cy) + ril
         if vrow_cursor < self.ovy:
             self.ovy = vrow_cursor
-        elif vrow_cursor >= self.ovy + h:
-            self.ovy = vrow_cursor - h + 1
+        elif vrow_cursor >= self.ovy + content_h:
+            self.ovy = vrow_cursor - content_h + 1
 
     def _move_up(self):
         dw = self._dw
@@ -1444,18 +1449,20 @@ class Editor:
 
     def _page_up(self, h: int):
         dw = self._dw
+        content_h = max(1, h - 2 * self._mv)
         segs = _wrap_segs(self.lines[self.cy], dw)
         ril, col = _cx_to_vrc(segs, self.cx)
         vrow = self._total_vrows_before(self.cy) + ril
-        self._vrow_seek(max(0, vrow - h), col)
+        self._vrow_seek(max(0, vrow - content_h), col)
 
     def _page_down(self, h: int):
         dw = self._dw
+        content_h = max(1, h - 2 * self._mv)
         segs = _wrap_segs(self.lines[self.cy], dw)
         ril, col = _cx_to_vrc(segs, self.cx)
         total = sum(len(_wrap_segs(l, dw)) for l in self.lines)
         vrow = self._total_vrows_before(self.cy) + ril
-        self._vrow_seek(min(total - 1, vrow + h), col)
+        self._vrow_seek(min(total - 1, vrow + content_h), col)
 
     def _backspace(self):
         if self.cx > 0:
@@ -1889,12 +1896,13 @@ def settings_screen(stdscr):
         ("sepia", "Doux  —  confort visuel (fond creme, texte brun-gris)"),
     ]
     MARGIN_IDX    = len(_THEMES)           # 3
-    WIFI_IDX      = len(_THEMES) + 1      # 4
-    WIFI_OFF_IDX  = len(_THEMES) + 2      # 5
-    UPDATE_IDX    = len(_THEMES) + 3      # 6
-    AUTO_IDX      = len(_THEMES) + 4      # 7
-    QUIT_IDX      = len(_THEMES) + 5      # 8
-    TOTAL         = len(_THEMES) + 6      # 9
+    MARGIN_V_IDX  = len(_THEMES) + 1      # 4
+    WIFI_IDX      = len(_THEMES) + 2      # 5
+    WIFI_OFF_IDX  = len(_THEMES) + 3      # 6
+    UPDATE_IDX    = len(_THEMES) + 4      # 7
+    AUTO_IDX      = len(_THEMES) + 5      # 8
+    QUIT_IDX      = len(_THEMES) + 6      # 9
+    TOTAL         = len(_THEMES) + 7      # 10
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -1941,8 +1949,10 @@ def settings_screen(stdscr):
 
         # ── Editeur ──
         _heading(row, "Editeur");  row += 2
-        m = _settings.get("margin", 1)
-        _item(row, MARGIN_IDX, f"Marge laterale :  [{max(0,m-1)}] {m} [{m+1}]  (← / →)");  row += 2
+        m  = _settings.get("margin",   1)
+        mv = _settings.get("margin_v", 1)
+        _item(row, MARGIN_IDX,   f"Marge laterale :   [{max(0,m-1)}] {m} [{m+1}]  (← / →)");  row += 1
+        _item(row, MARGIN_V_IDX, f"Marge verticale :  [{max(0,mv-1)}] {mv} [{mv+1}]  (← / →)");  row += 2
 
         _sep(row);  row += 2
 
@@ -1983,6 +1993,9 @@ def settings_screen(stdscr):
             elif sel == MARGIN_IDX:
                 _settings["margin"] = min(8, _settings.get("margin", 1) + 1)
                 _save_settings()
+            elif sel == MARGIN_V_IDX:
+                _settings["margin_v"] = min(8, _settings.get("margin_v", 1) + 1)
+                _save_settings()
             elif sel == WIFI_IDX:
                 if _settings.get("wifi_off", False):
                     _wifi_set_radio(True)
@@ -2003,6 +2016,9 @@ def settings_screen(stdscr):
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             if sel == MARGIN_IDX:
                 _settings["margin"] = max(0, _settings.get("margin", 1) - 1)
+                _save_settings()
+            elif sel == MARGIN_V_IDX:
+                _settings["margin_v"] = max(0, _settings.get("margin_v", 1) - 1)
                 _save_settings()
             else:
                 return False
