@@ -1764,7 +1764,8 @@ def settings_screen(stdscr):
     WIFI_OFF_IDX  = len(_THEMES) + 1      # 4
     UPDATE_IDX    = len(_THEMES) + 2      # 5
     AUTO_IDX      = len(_THEMES) + 3      # 6
-    TOTAL         = len(_THEMES) + 4      # 7
+    QUIT_IDX      = len(_THEMES) + 4      # 7
+    TOTAL         = len(_THEMES) + 5      # 8
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -1824,7 +1825,10 @@ def settings_screen(stdscr):
         ver = _settings.get("version", "?")
         _item(row, UPDATE_IDX, f"Installer la derniere version   (actuelle : {ver})");  row += 1
         auto_state = "active" if _is_autostart_enabled() else "desactive"
-        _item(row, AUTO_IDX, f"Demarrage automatique : {auto_state}")
+        _item(row, AUTO_IDX, f"Demarrage automatique : {auto_state}");  row += 2
+
+        _sep(row);  row += 2
+        _item(row, QUIT_IDX, "Fermer Freewrite  —  retourner au terminal")
 
         bottombar(stdscr, "  haut/bas Naviguer   -> Appliquer / Ouvrir   <- Retour")
         stdscr.refresh()
@@ -1854,8 +1858,13 @@ def settings_screen(stdscr):
                 _update_app(stdscr)
             elif sel == AUTO_IDX:
                 _toggle_autostart(stdscr)
+            elif sel == QUIT_IDX:
+                if confirm(stdscr, "Fermer Freewrite et revenir au terminal ?"):
+                    return True
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
-            return
+            return False
+
+    return False
 
 
 def home_screen(stdscr):
@@ -1866,7 +1875,7 @@ def home_screen(stdscr):
     while True:
         projects = sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir())
         n = len(projects)
-        total = n + 3   # n projets + Nouveau + Paramètres + Quitter
+        total = n + 2   # n projets + Nouveau + Paramètres
         sel = clamp(sel, 0, total - 1)
 
         h, w = stdscr.getmaxyx()
@@ -1938,7 +1947,6 @@ def home_screen(stdscr):
         menu_items = [
             (n,     "  +  Nouveau projet"),
             (n + 1, "  *  Parametres"),
-            (n + 2, "     Quitter"),
         ]
         for item_idx, label in menu_items:
             if row >= h - 1:
@@ -1987,16 +1995,13 @@ def home_screen(stdscr):
                     names = [p.name for p in new_projects]
                     sel = names.index(name) if name in names else sel
             elif sel == n + 1:
-                settings_screen(stdscr)
-            elif sel == n + 2:
-                return
+                if settings_screen(stdscr):
+                    return
         elif k == "x" and sel < n:
             to_del = projects[sel]
             if confirm(stdscr, f"Supprimer le projet \"{to_del.name}\" et tout son contenu ?"):
                 shutil.rmtree(to_del)
                 sel = max(0, sel - 1)
-        elif k == "q" or (ch is not None and ord(ch) == 27):
-            return
 
 
 # ── point d'entrée ───────────────────────────────────────────────────────────
