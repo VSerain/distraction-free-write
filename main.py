@@ -58,6 +58,8 @@ def _apply_theme(stdscr):
 # ── statut système (batterie / wifi) ─────────────────────────────────────────
 
 _sys_cache: dict = {"bat": "", "wifi": "", "ts": 0.0}
+_last_redraw: float = 0.0
+_REDRAW_INTERVAL: float = 5.0  # secondes entre deux repaints complets
 
 
 def _read_battery() -> str:
@@ -408,11 +410,21 @@ _ESC_MAP: dict[str, int] = {
 def next_key(stdscr):
     """Lit une touche. Retourne (char_str | None, keycode_int | None).
     Quand curses renvoie '\\033' seul (séquence non reconnue), on lit la
-    suite manuellement avec un court timeout et on consulte _ESC_MAP."""
+    suite manuellement avec un court timeout et on consulte _ESC_MAP.
+    Effectue un redrawwin() périodique pour éliminer les artefacts TTY."""
+    global _last_redraw
+    stdscr.timeout(2000)
     try:
         key = stdscr.get_wch()
     except curses.error:
+        # Timeout : pas de touche — repaint complet si l'intervalle est écoulé
+        now = time.time()
+        if now - _last_redraw >= _REDRAW_INTERVAL:
+            stdscr.redrawwin()
+            _last_redraw = now
+        stdscr.timeout(-1)
         return None, None
+    stdscr.timeout(-1)
 
     if isinstance(key, str):
         if key == "\033":
@@ -614,13 +626,15 @@ def _get_pubkey() -> tuple[str, Path | None]:
 def _loader(stdscr, message: str):
     """Affiche un message d'attente plein écran (opération bloquante)."""
     h, w = stdscr.getmaxyx()
-    stdscr.erase()
+    stdscr.clear()
     try:
         stdscr.addstr(h // 2, max(0, (w - len(message)) // 2), message, curses.A_DIM)
     except curses.error:
         pass
     bottombar(stdscr, "  Veuillez patienter...")
     stdscr.refresh()
+    # Force un repaint complet au retour pour éviter les artefacts post-subprocess
+    stdscr.redrawwin()
 
 
 def _text_page(stdscr, title: str, lines: list[str]):
@@ -1084,10 +1098,10 @@ def _wait_wifi_up(stdscr, timeout: int = 20) -> bool:
     Affiche un écran d'attente. Retourne True dès qu'une connexion est détectée."""
     for elapsed in range(timeout):
         if _is_wifi_connected():
-            return True
+            break
         dots = "." * ((elapsed % 3) + 1)
         h, w = stdscr.getmaxyx()
-        stdscr.erase()
+        stdscr.clear()
         msg = f"Activation du WiFi{dots}"
         try:
             stdscr.addstr(h // 2, max(0, (w - len(msg)) // 2), msg, curses.A_DIM)
@@ -1096,6 +1110,7 @@ def _wait_wifi_up(stdscr, timeout: int = 20) -> bool:
         bottombar(stdscr, f"  Reconnexion automatique en cours...  ({timeout - elapsed}s)")
         stdscr.refresh()
         time.sleep(1)
+    stdscr.redrawwin()
     return _is_wifi_connected()
 
 
@@ -1618,6 +1633,7 @@ def _flash(stdscr, msg: str, duration: float = 2.0):
     bottombar(stdscr, f"  {msg}")
     stdscr.refresh()
     time.sleep(duration)
+    stdscr.redrawwin()
 
 
 def _export_project_usb(stdscr, project_path: Path):
