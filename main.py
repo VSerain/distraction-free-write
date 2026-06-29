@@ -540,6 +540,35 @@ def git_branches(path: Path) -> list[str]:
     return local + [f"{b}  [remote]" for b in remote_only]
 
 
+def git_config_get(key: str) -> str:
+    """Lit une valeur de git config --global. Retourne '' si absente."""
+    try:
+        r = subprocess.run(
+            ["git", "config", "--global", key],
+            capture_output=True, text=True,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except FileNotFoundError:
+        return ""
+
+
+def git_config_set(key: str, value: str) -> tuple[bool, str]:
+    """Écrit une valeur dans git config --global."""
+    try:
+        r = subprocess.run(
+            ["git", "config", "--global", key, value],
+            capture_output=True, text=True,
+        )
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except FileNotFoundError as e:
+        return False, str(e)
+
+
+def git_identity_ok() -> bool:
+    """True si user.name et user.email sont configurés."""
+    return bool(git_config_get("user.name") and git_config_get("user.email"))
+
+
 def git_push(path: Path) -> tuple[bool, str]:
     branch = git_current_branch(path)
     ok, out = _git(path, "push", "origin", branch)
@@ -1022,6 +1051,11 @@ def _git_exec(stdscr, project_path: Path, action: str, remote: str) -> str | Non
         return None
 
     if action == "commit":
+        if not git_identity_ok():
+            _flash(stdscr, "Identite Git non configuree — ouvrez Parametres > Git", 2.5)
+            settings_screen(stdscr)
+            if not git_identity_ok():
+                return None
         if not git_has_changes(project_path):
             return "Aucune modification à commiter."
         msg = get_input(stdscr, "Message du commit")
@@ -2035,10 +2069,12 @@ def settings_screen(stdscr):
     MARGIN_V_IDX  = len(_THEMES) + 1      # 4
     WIFI_IDX      = len(_THEMES) + 2      # 5
     WIFI_OFF_IDX  = len(_THEMES) + 3      # 6
-    UPDATE_IDX    = len(_THEMES) + 4      # 7
-    AUTO_IDX      = len(_THEMES) + 5      # 8
-    QUIT_IDX      = len(_THEMES) + 6      # 9
-    TOTAL         = len(_THEMES) + 7      # 10
+    GIT_NAME_IDX  = len(_THEMES) + 4      # 7
+    GIT_EMAIL_IDX = len(_THEMES) + 5      # 8
+    UPDATE_IDX    = len(_THEMES) + 6      # 9
+    AUTO_IDX      = len(_THEMES) + 7      # 10
+    QUIT_IDX      = len(_THEMES) + 8      # 11
+    TOTAL         = len(_THEMES) + 9      # 12
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -2102,6 +2138,15 @@ def settings_screen(stdscr):
 
         _sep(row);  row += 2
 
+        # ── Git ──
+        _heading(row, "Git");  row += 2
+        git_name  = git_config_get("user.name")  or "(non defini)"
+        git_email = git_config_get("user.email") or "(non defini)"
+        _item(row, GIT_NAME_IDX,  f"Nom    : {git_name}");   row += 1
+        _item(row, GIT_EMAIL_IDX, f"Email  : {git_email}");  row += 2
+
+        _sep(row);  row += 2
+
         # ── Application ──
         _heading(row, "Application");  row += 2
         ver = _settings.get("version", "?")
@@ -2142,6 +2187,20 @@ def settings_screen(stdscr):
                 _save_settings()
                 _wifi_set_radio(not new_val)
                 _sys_cache["ts"] = 0.0
+            elif sel == GIT_NAME_IDX:
+                current_name = git_config_get("user.name")
+                val = get_input(stdscr, "Nom pour les commits Git", prefill=current_name)
+                if val:
+                    ok, out = git_config_set("user.name", val)
+                    if not ok:
+                        _text_page(stdscr, "Erreur git config", out.splitlines() or ["(inconnu)"])
+            elif sel == GIT_EMAIL_IDX:
+                current_email = git_config_get("user.email")
+                val = get_input(stdscr, "Email pour les commits Git", prefill=current_email)
+                if val:
+                    ok, out = git_config_set("user.email", val)
+                    if not ok:
+                        _text_page(stdscr, "Erreur git config", out.splitlines() or ["(inconnu)"])
             elif sel == UPDATE_IDX:
                 _update_app(stdscr)
             elif sel == AUTO_IDX:
