@@ -511,9 +511,21 @@ def git_current_branch(path: Path) -> str:
 
 def git_branches(path: Path) -> list[str]:
     ok, out = _git(path, "branch", "--format=%(refname:short)")
-    if not ok:
-        return []
-    return [b.strip() for b in out.splitlines() if b.strip()]
+    local = [b.strip() for b in out.splitlines() if b.strip()] if ok else []
+
+    ok2, out2 = _git(path, "branch", "-r", "--format=%(refname:short)")
+    local_set = set(local)
+    remote_only = []
+    if ok2:
+        for b in out2.splitlines():
+            b = b.strip()
+            if not b or "/HEAD" in b:
+                continue
+            name = b.split("/", 1)[-1] if "/" in b else b
+            if name not in local_set:
+                remote_only.append(name)
+
+    return local + [f"{b}  [remote]" for b in remote_only]
 
 
 def git_push(path: Path) -> tuple[bool, str]:
@@ -525,7 +537,21 @@ def git_push(path: Path) -> tuple[bool, str]:
 
 
 def git_pull(path: Path) -> tuple[bool, str]:
-    return _git(path, "pull")
+    ok, out = _git(path, "pull")
+    if not ok and "unrelated" in out.lower():
+        ok, out = _git(path, "pull", "--allow-unrelated-histories")
+    return ok, out
+
+
+def git_clone(url: str, dest: Path) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            ["git", "clone", url, str(dest)],
+            capture_output=True, text=True, timeout=120,
+        )
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return False, str(e)
 
 
 def git_create_branch(path: Path, name: str) -> tuple[bool, str]:
@@ -533,7 +559,10 @@ def git_create_branch(path: Path, name: str) -> tuple[bool, str]:
 
 
 def git_switch_branch(path: Path, name: str) -> tuple[bool, str]:
-    return _git(path, "checkout", name)
+    ok, out = _git(path, "checkout", name)
+    if not ok and ("did not match" in out or "pathspec" in out.lower()):
+        ok, out = _git(path, "checkout", "-b", name, f"origin/{name}")
+    return ok, out
 
 
 def git_remote_url(path: Path) -> str:
@@ -966,10 +995,11 @@ def _git_exec(stdscr, project_path: Path, action: str, remote: str) -> str | Non
         chosen = _pick_branch(stdscr, branches)
         if not chosen:
             return None
-        ok, out = git_switch_branch(project_path, chosen)
+        branch_name = chosen.removesuffix("  [remote]")
+        ok, out = git_switch_branch(project_path, branch_name)
         if not ok:
             return _err(stdscr, "git checkout", out)
-        return f"✓ Basculé sur « {chosen} »"
+        return f"✓ Basculé sur « {branch_name} »"
 
     if action == "history":
         _history_view(stdscr, project_path)
@@ -2071,6 +2101,46 @@ def _poweroff(stdscr):
             continue
 
 
+def _clone_screen(stdscr):
+    """Clone un dépôt GitHub dans ~/Projets."""
+    _wifi_managed = _settings.get("wifi_off", False)
+    if _wifi_managed:
+        _wifi_set_radio(True)
+        _wait_wifi_up(stdscr)
+    if not _is_network_connected():
+        _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
+        _wifi_connect_screen(stdscr)
+    if not _is_network_connected():
+        if _wifi_managed:
+            _wifi_set_radio(False)
+        _flash(stdscr, "Le clonage necessite une connexion reseau.")
+        return
+
+    try:
+        url = get_input(stdscr, "URL GitHub a cloner")
+        if not url:
+            return
+        guess = url.rstrip("/").split("/")[-1]
+        if guess.endswith(".git"):
+            guess = guess[:-4]
+        name = get_input(stdscr, "Nom du projet local", prefill=guess)
+        if not name:
+            return
+        dest = PROJECTS_DIR / name
+        if dest.exists():
+            _flash(stdscr, f"Un projet « {name} » existe deja.")
+            return
+        _loader(stdscr, f"Clonage de {url}...")
+        ok, out = git_clone(url, dest)
+        if ok:
+            _flash(stdscr, f"Projet « {name} » clone avec succes !")
+        else:
+            _text_page(stdscr, "Erreur — git clone", out.splitlines() or ["(pas de detail)"])
+    finally:
+        if _wifi_managed:
+            _wifi_set_radio(False)
+
+
 def home_screen(stdscr):
     """Écran d'accueil : logo centré + projets + menu."""
     sel = 0
@@ -2079,7 +2149,7 @@ def home_screen(stdscr):
     while True:
         projects = sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir())
         n = len(projects)
-        total = n + 3   # n projets + Nouveau + Paramètres + Eteindre
+        total = n + 4   # n projets + Nouveau + Cloner + Paramètres + Eteindre
         sel = clamp(sel, 0, total - 1)
 
         h, w = stdscr.getmaxyx()
@@ -2150,8 +2220,9 @@ def home_screen(stdscr):
         # ── Menu fixe ─────────────────────────────────────────────────────────
         menu_items = [
             (n,     "  +  Nouveau projet"),
-            (n + 1, "  *  Parametres"),
-            (n + 2, "  o  Eteindre l'ordinateur"),
+            (n + 1, "  v  Cloner depuis GitHub"),
+            (n + 2, "  *  Parametres"),
+            (n + 3, "  o  Eteindre l'ordinateur"),
         ]
         for item_idx, label in menu_items:
             if row >= h - 1:
@@ -2200,9 +2271,13 @@ def home_screen(stdscr):
                     names = [p.name for p in new_projects]
                     sel = names.index(name) if name in names else sel
             elif sel == n + 1:
+                _clone_screen(stdscr)
+                new_projects = sorted(p for p in PROJECTS_DIR.iterdir() if p.is_dir())
+                sel = clamp(sel, 0, len(new_projects) + 3)
+            elif sel == n + 2:
                 if settings_screen(stdscr):
                     return
-            elif sel == n + 2:
+            elif sel == n + 3:
                 _poweroff(stdscr)
         elif k == "x" and sel < n:
             to_del = projects[sel]
