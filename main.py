@@ -1849,6 +1849,100 @@ _LOGO = [
 _TAGLINE = "ecrire, sans distraction"
 
 _GITHUB_REPO = "VSerain/distraction-free-write"
+
+
+def _github_list_repos(username: str, token: str = "") -> "list[dict] | None":
+    """Retourne la liste des repos GitHub de l'utilisateur via l'API REST.
+    Retourne None en cas d'erreur réseau/API."""
+    headers = ["Accept: application/vnd.github+json"]
+    if token:
+        headers += [f"Authorization: Bearer {token}"]
+    try:
+        all_repos: list[dict] = []
+        page = 1
+        while True:
+            url = (
+                f"https://api.github.com/user/repos?per_page=100&page={page}&sort=updated"
+                if token else
+                f"https://api.github.com/users/{username}/repos?per_page=100&page={page}&sort=updated"
+            )
+            cmd = ["curl", "-fsSL"]
+            for h in headers:
+                cmd += ["-H", h]
+            cmd.append(url)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return None
+            batch = json.loads(r.stdout)
+            if not isinstance(batch, list) or not batch:
+                break
+            all_repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return all_repos
+    except Exception:
+        return None
+
+
+def _pick_github_repo(stdscr, repos: list[dict]) -> "str | None":
+    """Picker plein écran dans la liste des repos GitHub. Retourne l'URL SSH."""
+    sel = 0
+    query = ""
+    while True:
+        filtered = [r for r in repos if query.lower() in r["full_name"].lower()] if query else repos
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        topbar(stdscr, "Choisir un repo GitHub")
+        row = 1
+        if row < h - 1:
+            try:
+                prompt = f"  Filtre : {query}_"
+                stdscr.addstr(row, 0, prompt[:w])
+            except curses.error:
+                pass
+            row += 1
+        sel = clamp(sel, 0, max(0, len(filtered) - 1))
+        for i, repo in enumerate(filtered):
+            if row >= h - 1:
+                break
+            is_sel = (i == sel)
+            lock = " [prive]" if repo.get("private") else ""
+            label = f"  {'>' if is_sel else ' '}  {repo['full_name']}{lock}"
+            try:
+                if is_sel:
+                    stdscr.attron(curses.A_REVERSE)
+                    stdscr.addstr(row, 0, label[:w].ljust(w))
+                    stdscr.attroff(curses.A_REVERSE)
+                else:
+                    stdscr.addstr(row, 0, label[:w])
+            except curses.error:
+                pass
+            row += 1
+        if not filtered and row < h - 1:
+            try:
+                stdscr.addstr(row, 4, "(aucun résultat)")
+            except curses.error:
+                pass
+        bottombar(stdscr, "  haut/bas Nav   -> Cloner   lettres Filtre   Suppr Effacer   <- Retour")
+        stdscr.refresh()
+
+        ch, code = next_key(stdscr)
+        if code == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif code == curses.KEY_DOWN:
+            sel = min(max(0, len(filtered) - 1), sel + 1)
+        elif code in (curses.KEY_RIGHT, curses.KEY_ENTER) or ch in ("\n", "\r"):
+            if filtered:
+                return filtered[sel]["ssh_url"]
+        elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
+            return None
+        elif code in (curses.KEY_BACKSPACE, curses.KEY_DC) or ch == "\x7f":
+            query = query[:-1]
+            sel = 0
+        elif ch and ch.isprintable():
+            query += ch
+            sel = 0
 _INSTALL_PATH = Path("/opt/distracfreewrite/main.py")
 
 
@@ -2069,12 +2163,14 @@ def settings_screen(stdscr):
     MARGIN_V_IDX  = len(_THEMES) + 1      # 4
     WIFI_IDX      = len(_THEMES) + 2      # 5
     WIFI_OFF_IDX  = len(_THEMES) + 3      # 6
-    GIT_NAME_IDX  = len(_THEMES) + 4      # 7
-    GIT_EMAIL_IDX = len(_THEMES) + 5      # 8
-    UPDATE_IDX    = len(_THEMES) + 6      # 9
-    AUTO_IDX      = len(_THEMES) + 7      # 10
-    QUIT_IDX      = len(_THEMES) + 8      # 11
-    TOTAL         = len(_THEMES) + 9      # 12
+    GIT_NAME_IDX   = len(_THEMES) + 4      # 7
+    GIT_EMAIL_IDX  = len(_THEMES) + 5      # 8
+    GH_USER_IDX    = len(_THEMES) + 6      # 9
+    GH_TOKEN_IDX   = len(_THEMES) + 7      # 10
+    UPDATE_IDX     = len(_THEMES) + 8      # 11
+    AUTO_IDX       = len(_THEMES) + 9      # 12
+    QUIT_IDX       = len(_THEMES) + 10     # 13
+    TOTAL          = len(_THEMES) + 11     # 14
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -2143,7 +2239,12 @@ def settings_screen(stdscr):
         git_name  = git_config_get("user.name")  or "(non defini)"
         git_email = git_config_get("user.email") or "(non defini)"
         _item(row, GIT_NAME_IDX,  f"Nom    : {git_name}");   row += 1
-        _item(row, GIT_EMAIL_IDX, f"Email  : {git_email}");  row += 2
+        _item(row, GIT_EMAIL_IDX, f"Email  : {git_email}");  row += 1
+        gh_user  = _settings.get("github_user",  "") or "(non defini)"
+        gh_token = _settings.get("github_token", "")
+        gh_token_disp = ("*" * min(8, len(gh_token))) if gh_token else "(non defini)"
+        _item(row, GH_USER_IDX,  f"GitHub user  : {gh_user}");      row += 1
+        _item(row, GH_TOKEN_IDX, f"GitHub token : {gh_token_disp}"); row += 2
 
         _sep(row);  row += 2
 
@@ -2201,6 +2302,16 @@ def settings_screen(stdscr):
                     ok, out = git_config_set("user.email", val)
                     if not ok:
                         _text_page(stdscr, "Erreur git config", out.splitlines() or ["(inconnu)"])
+            elif sel == GH_USER_IDX:
+                val = get_input(stdscr, "Nom d'utilisateur GitHub", prefill=_settings.get("github_user", ""))
+                if val is not None:
+                    _settings["github_user"] = val
+                    _save_settings()
+            elif sel == GH_TOKEN_IDX:
+                val = get_input(stdscr, "Token GitHub (Personal Access Token — laisser vide pour supprimer)", prefill="")
+                if val is not None:
+                    _settings["github_token"] = val
+                    _save_settings()
             elif sel == UPDATE_IDX:
                 _update_app(stdscr)
             elif sel == AUTO_IDX:
@@ -2249,9 +2360,26 @@ def _clone_screen(stdscr):
         return
 
     try:
-        url = get_input(stdscr, "URL GitHub a cloner")
+        # ── Tentative de listing via l'API GitHub ─────────────────────────
+        github_user  = _settings.get("github_user", "")
+        github_token = _settings.get("github_token", "")
+        url = None
+
+        if github_user or github_token:
+            _loader(stdscr, "Chargement de vos repos GitHub...")
+            repos = _github_list_repos(github_user, github_token)
+            if repos is not None:
+                url = _pick_github_repo(stdscr, repos)
+                if url is None:
+                    return  # l'utilisateur a appuyé sur Retour
+            else:
+                _flash(stdscr, "Impossible de charger les repos — saisie manuelle.", 1.5)
+
+        if not url:
+            url = get_input(stdscr, "URL GitHub a cloner (SSH ou HTTPS)")
         if not url:
             return
+
         guess = url.rstrip("/").split("/")[-1]
         if guess.endswith(".git"):
             guess = guess[:-4]
