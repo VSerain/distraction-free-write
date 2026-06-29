@@ -656,9 +656,68 @@ def _text_page(stdscr, title: str, lines: list[str]):
             return
 
 
+def _usb_automount(devpath: str) -> str | None:
+    """Tente de monter un périphérique via udisksctl ; retourne le point de montage ou None."""
+    try:
+        r = subprocess.run(
+            ["udisksctl", "mount", "-b", devpath, "--no-user-interaction"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            # "Mounted /dev/sdb1 at /media/user/USBNAME."
+            for part in r.stdout.split():
+                if part.startswith("/") and part != devpath:
+                    return part.rstrip(".")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
 def _find_usb_drives() -> list[Path]:
-    """Retourne les points de montage détectés sous /media et /mnt."""
+    """Retourne les points de montage des périphériques amovibles.
+
+    Utilise lsblk pour trouver les partitions amovibles (sdb, sdc…),
+    les monte automatiquement via udisksctl si nécessaire, puis complète
+    avec un scan classique de /media et /mnt.
+    """
     import os as _os
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    # --- lsblk : détection des périphériques amovibles --------------------
+    try:
+        r = subprocess.run(
+            ["lsblk", "-J", "-o", "NAME,RM,MOUNTPOINT,FSTYPE,TYPE"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            import json as _json
+            data = _json.loads(r.stdout)
+            for dev in data.get("blockdevices", []):
+                children = dev.get("children") or ([dev] if dev.get("type") == "disk" else [])
+                for part in children:
+                    if not part.get("rm"):          # pas amovible
+                        continue
+                    if not part.get("fstype"):      # pas de système de fichiers
+                        continue
+                    mp = part.get("mountpoint") or ""
+                    if mp and mp != "[SWAP]":
+                        p = Path(mp)
+                        if p not in seen:
+                            result.append(p)
+                            seen.add(p)
+                    else:
+                        devpath = f"/dev/{part['name']}"
+                        mp = _usb_automount(devpath)
+                        if mp:
+                            p = Path(mp)
+                            if p not in seen:
+                                result.append(p)
+                                seen.add(p)
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+
+    # --- fallback : scan classique des répertoires de montage -------------
     username = Path.home().name
     roots = [
         Path("/media") / username,
@@ -666,8 +725,6 @@ def _find_usb_drives() -> list[Path]:
         Path("/media"),
         Path("/mnt"),
     ]
-    seen: set[Path] = set()
-    result: list[Path] = []
     for root in roots:
         if not root.is_dir():
             continue
