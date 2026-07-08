@@ -2175,8 +2175,9 @@ def settings_screen(stdscr):
     UPDATE_IDX     = len(_THEMES) + 8      # 11
     AUTO_IDX       = len(_THEMES) + 9      # 12
     POWEROFF_IDX   = len(_THEMES) + 10     # 13
-    QUIT_IDX       = len(_THEMES) + 11     # 14
-    TOTAL          = len(_THEMES) + 12     # 15
+    DEBUG_IDX      = len(_THEMES) + 11     # 14
+    QUIT_IDX       = len(_THEMES) + 12     # 15
+    TOTAL          = len(_THEMES) + 13     # 16
     _POWEROFF_STEPS = [0, 5, 10, 15, 20, 30, 45, 60, 90, 120]
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
@@ -2264,7 +2265,8 @@ def settings_screen(stdscr):
 
         poweroff_min = _settings.get("auto_poweroff_min", 0)
         poweroff_lbl = "desactive" if poweroff_min == 0 else f"{poweroff_min} min"
-        _item(row, POWEROFF_IDX, f"Extinction auto apres veille (inactif ou capot ferme) : {poweroff_lbl}  (← / →)");  row += 2
+        _item(row, POWEROFF_IDX, f"Extinction auto apres veille (inactif ou capot ferme) : {poweroff_lbl}  (← / →)");  row += 1
+        _item(row, DEBUG_IDX, "Debug  —  diagnostics et commandes shell");  row += 2
 
         _sep(row);  row += 2
         _item(row, QUIT_IDX, "Fermer DistracFreeWrite  —  retourner au terminal")
@@ -2335,6 +2337,8 @@ def settings_screen(stdscr):
                 _save_settings()
                 if _settings["auto_poweroff_min"] > 0:
                     _ensure_poweroff_system(stdscr)
+            elif sel == DEBUG_IDX:
+                _debug_screen(stdscr)
             elif sel == QUIT_IDX:
                 if confirm(stdscr, "Fermer DistracFreeWrite et revenir au terminal ?"):
                     return True
@@ -2365,6 +2369,88 @@ def _do_poweroff():
             break
         except Exception:
             continue
+
+
+# ── debug ─────────────────────────────────────────────────────────────────────
+
+_DIAG_POWEROFF_CMD = r"""
+echo "== journalctl (lid / hibernate / suspend / logind / poweroff) =="
+journalctl -b --no-pager | grep -iE 'lid|hibernat|suspend|logind|poweroff|shutdown' | tail -80
+echo
+echo "== memoire / swap =="
+free -h
+swapon --show
+grep -o 'resume=[^ ]*' /proc/cmdline
+echo
+echo "== drop-in logind =="
+cat /etc/systemd/logind.conf.d/50-distracfreewrite-poweroff.conf 2>/dev/null || echo "(absent)"
+echo
+echo "== hook systemd-sleep =="
+cat /usr/lib/systemd/system-sleep/distracfreewrite-poweroff 2>/dev/null || echo "(absent)"
+echo
+echo "== alarme RTC / marqueur =="
+echo -n "wakealarm: "; cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null || echo "(illisible)"
+echo -n "marqueur : "; cat /run/distracfreewrite-poweroff-alarm 2>/dev/null || echo "(absent)"
+"""
+
+
+def _run_shell(cmd: str, timeout: int = 30) -> list[str]:
+    try:
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout or "") + (r.stderr or "")
+        lines = out.splitlines() or ["(aucune sortie)"]
+        lines.append(f"[code de retour : {r.returncode}]")
+        return lines
+    except subprocess.TimeoutExpired:
+        return ["Commande interrompue (timeout)."]
+    except Exception as e:
+        return [f"Erreur : {e}"]
+
+
+def _debug_screen(stdscr):
+    items = [
+        "Diagnostic extinction / veille",
+        "Executer une commande shell",
+    ]
+    sel = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        topbar(stdscr, "Debug")
+        for i, label in enumerate(items):
+            row = 2 + i
+            is_sel = (sel == i)
+            line = f"  {'>' if is_sel else ' '}  {label}"
+            try:
+                if is_sel:
+                    stdscr.attron(curses.A_REVERSE)
+                    stdscr.addstr(row, 0, line[:w].ljust(w))
+                    stdscr.attroff(curses.A_REVERSE)
+                else:
+                    stdscr.addstr(row, 0, line[:w])
+            except curses.error:
+                pass
+        bottombar(stdscr, "  haut/bas Naviguer   -> Ouvrir   <- Retour")
+        stdscr.refresh()
+
+        ch, code = next_key(stdscr)
+        if code == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif code == curses.KEY_DOWN:
+            sel = min(len(items) - 1, sel + 1)
+        elif code in (curses.KEY_RIGHT, curses.KEY_ENTER) or ch in ("\n", "\r"):
+            if sel == 0:
+                _loader(stdscr, "Diagnostic en cours...")
+                lines = _run_shell(_DIAG_POWEROFF_CMD, timeout=20)
+                _text_page(stdscr, "Diagnostic extinction / veille", lines)
+            elif sel == 1:
+                cmd = get_input(stdscr, "Commande shell a executer")
+                if cmd:
+                    _loader(stdscr, "Execution...")
+                    lines = _run_shell(cmd)
+                    _text_page(stdscr, f"$ {cmd}", lines)
+        elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
+            return
 
 
 def _poweroff(stdscr):
