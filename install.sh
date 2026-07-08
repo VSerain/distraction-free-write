@@ -111,6 +111,18 @@ mkdir -p "$REAL_HOME/.config/distracfreewrite"
 chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/distracfreewrite"
 info "Dossiers ~/Projets et ~/.config/distracfreewrite créés"
 
+# ── extinction automatique après veille prolongée (capot fermé) ──────────────
+#
+# Le réglage "Extinction auto après veille" des paramètres de l'app ne peut
+# rien faire pendant que la machine est suspendue (le processus est gelé).
+# Ce hook systemd-sleep (contenu défini dans main.py, seule source de vérité)
+# pose une alarme RTC matérielle juste avant la veille ; si la machine n'a
+# pas été réveillée par l'utilisateur avant l'échéance, elle s'éteint
+# complètement au réveil au lieu de rester en veille indéfiniment.
+
+python3 "$INSTALL_DIR/main.py" --install-sleep-hook "$REAL_HOME"
+info "Extinction après veille prolongée configurée (hook systemd-sleep)"
+
 # ── démarrage automatique ─────────────────────────────────────────────────────
 
 title "3/4  Démarrage automatique"

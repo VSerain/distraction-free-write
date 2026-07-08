@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import re
+import sys
 import json
 import time
 import curses
@@ -422,9 +423,11 @@ def next_key(stdscr):
         if now - _last_redraw >= _REDRAW_INTERVAL:
             stdscr.redrawwin()
             _last_redraw = now
+        _check_auto_poweroff(stdscr)
         stdscr.timeout(-1)
         return None, None
     stdscr.timeout(-1)
+    _register_activity()
 
     if isinstance(key, str):
         if key == "\033":
@@ -2016,6 +2019,8 @@ def _update_app(stdscr):
         shutil.copy2(tmp, _INSTALL_PATH)
         _settings["version"] = tag
         _save_settings()
+        if _settings.get("auto_poweroff_min", 0) > 0:
+            _ensure_sleep_hook(stdscr)
         if confirm(stdscr, f"Version {tag} installee. Redemarrer le systeme maintenant ?"):
             curses.endwin()
             subprocess.run(["systemctl", "reboot"], check=False)
@@ -2169,8 +2174,10 @@ def settings_screen(stdscr):
     GH_TOKEN_IDX   = len(_THEMES) + 7      # 10
     UPDATE_IDX     = len(_THEMES) + 8      # 11
     AUTO_IDX       = len(_THEMES) + 9      # 12
-    QUIT_IDX       = len(_THEMES) + 10     # 13
-    TOTAL          = len(_THEMES) + 11     # 14
+    POWEROFF_IDX   = len(_THEMES) + 10     # 13
+    QUIT_IDX       = len(_THEMES) + 11     # 14
+    TOTAL          = len(_THEMES) + 12     # 15
+    _POWEROFF_STEPS = [0, 5, 10, 15, 20, 30, 45, 60, 90, 120]
     current       = _settings.get("theme", "dark")
     sel           = next((i for i, (k, _) in enumerate(_THEMES) if k == current), 0)
 
@@ -2255,6 +2262,10 @@ def settings_screen(stdscr):
         auto_state = "active" if _is_autostart_enabled() else "desactive"
         _item(row, AUTO_IDX, f"Demarrage automatique : {auto_state}");  row += 2
 
+        poweroff_min = _settings.get("auto_poweroff_min", 0)
+        poweroff_lbl = "desactive" if poweroff_min == 0 else f"{poweroff_min} min"
+        _item(row, POWEROFF_IDX, f"Extinction auto apres veille (inactif ou capot ferme) : {poweroff_lbl}  (← / →)");  row += 2
+
         _sep(row);  row += 2
         _item(row, QUIT_IDX, "Fermer DistracFreeWrite  —  retourner au terminal")
 
@@ -2316,6 +2327,14 @@ def settings_screen(stdscr):
                 _update_app(stdscr)
             elif sel == AUTO_IDX:
                 _toggle_autostart(stdscr)
+            elif sel == POWEROFF_IDX:
+                cur = _settings.get("auto_poweroff_min", 0)
+                idx = _POWEROFF_STEPS.index(cur) if cur in _POWEROFF_STEPS else 0
+                idx = min(len(_POWEROFF_STEPS) - 1, idx + 1)
+                _settings["auto_poweroff_min"] = _POWEROFF_STEPS[idx]
+                _save_settings()
+                if _settings["auto_poweroff_min"] > 0:
+                    _ensure_sleep_hook(stdscr)
             elif sel == QUIT_IDX:
                 if confirm(stdscr, "Fermer DistracFreeWrite et revenir au terminal ?"):
                     return True
@@ -2326,15 +2345,19 @@ def settings_screen(stdscr):
             elif sel == MARGIN_V_IDX:
                 _settings["margin_v"] = max(0, _settings.get("margin_v", 1) - 1)
                 _save_settings()
+            elif sel == POWEROFF_IDX:
+                cur = _settings.get("auto_poweroff_min", 0)
+                idx = _POWEROFF_STEPS.index(cur) if cur in _POWEROFF_STEPS else 0
+                idx = max(0, idx - 1)
+                _settings["auto_poweroff_min"] = _POWEROFF_STEPS[idx]
+                _save_settings()
             else:
                 return False
 
     return False
 
 
-def _poweroff(stdscr):
-    if not confirm(stdscr, "Eteindre l'ordinateur ?"):
-        return
+def _do_poweroff():
     curses.endwin()
     for cmd in [["systemctl", "poweroff"], ["poweroff"], ["sudo", "shutdown", "-h", "now"]]:
         try:
@@ -2342,6 +2365,143 @@ def _poweroff(stdscr):
             break
         except Exception:
             continue
+
+
+def _poweroff(stdscr):
+    if not confirm(stdscr, "Eteindre l'ordinateur ?"):
+        return
+    _do_poweroff()
+
+
+# ── extinction automatique apres veille ──────────────────────────────────────
+
+_last_activity: float = time.time()
+
+
+def _register_activity():
+    global _last_activity
+    _last_activity = time.time()
+
+
+def _check_auto_poweroff(stdscr):
+    """Eteint la machine sans confirmation apres X minutes d'inactivite,
+    pour economiser la batterie sur les veilles prolongees."""
+    minutes = _settings.get("auto_poweroff_min", 0)
+    if not minutes:
+        return
+    if time.time() - _last_activity >= minutes * 60:
+        _do_poweroff()
+
+
+# ── extinction apres veille systeme prolongee (capot ferme) ─────────────────
+#
+# Pendant une veille (suspend), ce process est gele : il ne peut ni compter
+# le temps ni agir. Un hook systemd-sleep (root) pose donc une alarme RTC
+# juste avant la veille et eteint la machine au reveil si l'alarme a ete
+# atteinte. Le hook relit "auto_poweroff_min" dans config.json a chaque
+# veille : un changement fait dans l'app est donc pris en compte des la
+# prochaine mise en veille, sans reinstallation.
+
+_SLEEP_HOOK_PATH    = Path("/usr/lib/systemd/system-sleep/distracfreewrite-poweroff")
+_SLEEP_HOOK_VERSION = 1   # a incrementer si le contenu du hook change
+
+
+def _sleep_hook_content(home: Path) -> str:
+    return f"""#!/bin/bash
+# Installe par DistracFreeWrite — ne pas editer a la main.
+# hook_version={_SLEEP_HOOK_VERSION}
+
+CONFIG_FILE="{home}/.config/distracfreewrite/config.json"
+MARKER="/run/distracfreewrite-poweroff-alarm"
+RTC="/sys/class/rtc/rtc0/wakealarm"
+
+case "$1/$2" in
+  pre/*)
+    [ -f "$CONFIG_FILE" ] || exit 0
+    [ -w "$RTC" ] || exit 0
+    MINUTES=$(python3 -c "import json,sys
+try:
+    print(int(json.load(open(sys.argv[1])).get('auto_poweroff_min', 0)))
+except Exception:
+    print(0)" "$CONFIG_FILE" 2>/dev/null || echo 0)
+    [ "$MINUTES" -gt 0 ] 2>/dev/null || exit 0
+    TARGET=$(( $(date +%s) + MINUTES * 60 ))
+    echo 0 > "$RTC" 2>/dev/null
+    echo "$TARGET" > "$RTC" 2>/dev/null
+    echo "$TARGET" > "$MARKER"
+    ;;
+  post/*)
+    [ -f "$MARKER" ] || exit 0
+    TARGET=$(cat "$MARKER")
+    rm -f "$MARKER"
+    echo 0 > "$RTC" 2>/dev/null
+    NOW=$(date +%s)
+    if [ "$NOW" -ge "$((TARGET - 15))" ]; then
+        systemctl poweroff
+    fi
+    ;;
+esac
+"""
+
+
+def _sleep_hook_up_to_date() -> bool:
+    try:
+        return f"hook_version={_SLEEP_HOOK_VERSION}" in _SLEEP_HOOK_PATH.read_text()
+    except Exception:
+        return False
+
+
+def _install_sleep_hook_as_root(home: "Path | None" = None) -> tuple[bool, str]:
+    """Ecrit le hook systemd-sleep. A appeler alors que ce process est deja
+    root (install.sh via --install-sleep-hook)."""
+    try:
+        _SLEEP_HOOK_PATH.write_text(_sleep_hook_content(home or Path.home()))
+        _SLEEP_HOOK_PATH.chmod(0o755)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _ensure_sleep_hook(stdscr) -> bool:
+    """S'assure que le hook systemd-sleep est present et a jour. Si absent
+    (ex: mise a jour depuis une ancienne version installee sans le hook),
+    propose une elevation sudo ponctuelle pour l'installer — permet aux
+    installations existantes d'obtenir la fonctionnalite sans relancer
+    install.sh."""
+    if _sleep_hook_up_to_date():
+        return True
+    if not confirm(stdscr, "Extinction apres veille prolongee (capot ferme) : "
+                            "installer le module systeme requis "
+                            "(mot de passe administrateur) ?"):
+        return False
+
+    home = Path.home()
+    tmp = Path("/tmp/distracfreewrite_sleep_hook")
+    tmp.write_text(_sleep_hook_content(home))
+    tmp.chmod(0o755)
+
+    curses.endwin()
+    try:
+        print("\nMot de passe administrateur necessaire pour installer "
+              "l'extinction automatique apres veille prolongee.\n")
+        r = subprocess.run(["sudo", "install", "-o", "root", "-g", "root", "-m", "755",
+                            str(tmp), str(_SLEEP_HOOK_PATH)])
+        ok = (r.returncode == 0)
+    except Exception:
+        ok = False
+    finally:
+        tmp.unlink(missing_ok=True)
+        stdscr.refresh()
+
+    if not ok:
+        _text_page(stdscr, "Installation incomplete", [
+            "Le module d'extinction apres veille prolongee n'a pas pu",
+            "etre installe (mot de passe incorrect ou sudo indisponible).",
+            "",
+            "Le reglage reste actif pour l'inactivite simple (app ouverte),",
+            "mais pas pour la mise en veille (capot ferme).",
+        ])
+    return ok
 
 
 def _clone_screen(stdscr):
@@ -2586,5 +2746,14 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-sleep-hook":
+        # Appele par install.sh, deja root : ecriture directe, sans sudo.
+        _home = Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home()
+        _ok, _err = _install_sleep_hook_as_root(_home)
+        if not _ok:
+            print(f"Erreur : {_err}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
     os.environ.setdefault("ESCDELAY", "25")   # ESC réactif sans attendre 1 s
     curses.wrapper(main)
