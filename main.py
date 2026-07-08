@@ -2020,7 +2020,7 @@ def _update_app(stdscr):
         _settings["version"] = tag
         _save_settings()
         if _settings.get("auto_poweroff_min", 0) > 0:
-            _ensure_sleep_hook(stdscr)
+            _ensure_poweroff_system(stdscr)
         if confirm(stdscr, f"Version {tag} installee. Redemarrer le systeme maintenant ?"):
             curses.endwin()
             subprocess.run(["systemctl", "reboot"], check=False)
@@ -2334,7 +2334,7 @@ def settings_screen(stdscr):
                 _settings["auto_poweroff_min"] = _POWEROFF_STEPS[idx]
                 _save_settings()
                 if _settings["auto_poweroff_min"] > 0:
-                    _ensure_sleep_hook(stdscr)
+                    _ensure_poweroff_system(stdscr)
             elif sel == QUIT_IDX:
                 if confirm(stdscr, "Fermer DistracFreeWrite et revenir au terminal ?"):
                     return True
@@ -2395,15 +2395,29 @@ def _check_auto_poweroff(stdscr):
 
 # ── extinction apres veille systeme prolongee (capot ferme) ─────────────────
 #
-# Pendant une veille (suspend), ce process est gele : il ne peut ni compter
-# le temps ni agir. Un hook systemd-sleep (root) pose donc une alarme RTC
-# juste avant la veille et eteint la machine au reveil si l'alarme a ete
-# atteinte. Le hook relit "auto_poweroff_min" dans config.json a chaque
-# veille : un changement fait dans l'app est donc pris en compte des la
-# prochaine mise en veille, sans reinstallation.
+# Pendant une veille (suspend S3), ce process est gele : il ne peut ni
+# compter le temps ni agir. On pose donc une alarme RTC materielle juste
+# avant la mise en veille pour reveiller la machine et l'eteindre au bout
+# de X minutes — MAIS sur beaucoup de portables, le firmware ne sait
+# reveiller la machine par RTC que depuis l'hibernation (S4), jamais depuis
+# la simple veille RAM (S3) : `dmesg | grep rtc_cmos` affiche alors
+# "RTC can wake from S4". Dans ce cas l'alarme posee avant un S3 est
+# silencieusement ignoree ; la machine ne s'eteint qu'au reveil manuel
+# suivant, une fois la veille deja ecoulee.
+#
+# Pour que l'extinction se declenche vraiment pendant que le capot reste
+# ferme, on force donc la fermeture du capot a hiberner (S4) plutot que de
+# suspendre (drop-in logind), ce qui rend le reveil RTC fiable en plus de
+# ramener la consommation batterie a ~0 des la fermeture du capot.
+#
+# Le hook relit "auto_poweroff_min" dans config.json a chaque veille : un
+# changement fait dans l'app est donc pris en compte des la prochaine mise
+# en veille, sans reinstallation.
 
-_SLEEP_HOOK_PATH    = Path("/usr/lib/systemd/system-sleep/distracfreewrite-poweroff")
-_SLEEP_HOOK_VERSION = 1   # a incrementer si le contenu du hook change
+_SLEEP_HOOK_PATH       = Path("/usr/lib/systemd/system-sleep/distracfreewrite-poweroff")
+_SLEEP_HOOK_VERSION    = 1   # a incrementer si le contenu du hook change
+_LOGIND_DROPIN_PATH    = Path("/etc/systemd/logind.conf.d/50-distracfreewrite-poweroff.conf")
+_LOGIND_DROPIN_VERSION = 1   # a incrementer si le contenu du drop-in change
 
 
 def _sleep_hook_content(home: Path) -> str:
@@ -2444,53 +2458,95 @@ esac
 """
 
 
-def _sleep_hook_up_to_date() -> bool:
+def _logind_dropin_content() -> str:
+    return f"""[Login]
+# Installe par DistracFreeWrite — ne pas editer a la main.
+# dropin_version={_LOGIND_DROPIN_VERSION}
+#
+# Le capot ferme hiberne (S4) au lieu de suspendre (S3) : sur la plupart
+# des portables, seule l'hibernation peut etre reveillee par une alarme
+# RTC, ce qui est necessaire pour que "Extinction auto apres veille"
+# fonctionne pendant que le capot reste ferme. Effet secondaire benefique :
+# consommation batterie ~0 des la fermeture du capot, meme sans minuteur.
+HandleLidSwitch=hibernate
+HandleLidSwitchExternalPower=hibernate
+"""
+
+
+def _hibernate_swap_ok() -> bool:
+    """Verifie grossierement que le swap est suffisant pour hiberner
+    (approximation : swap >= RAM totale)."""
     try:
-        return f"hook_version={_SLEEP_HOOK_VERSION}" in _SLEEP_HOOK_PATH.read_text()
+        info = Path("/proc/meminfo").read_text()
+        def _kb(label):
+            for line in info.splitlines():
+                if line.startswith(label):
+                    return int(line.split()[1])
+            return 0
+        return _kb("SwapTotal:") >= _kb("MemTotal:")
     except Exception:
         return False
 
 
-def _install_sleep_hook_as_root(home: "Path | None" = None) -> tuple[bool, str]:
-    """Ecrit le hook systemd-sleep. A appeler alors que ce process est deja
-    root (install.sh via --install-sleep-hook)."""
+def _system_setup_up_to_date() -> bool:
+    try:
+        hook_ok = f"hook_version={_SLEEP_HOOK_VERSION}" in _SLEEP_HOOK_PATH.read_text()
+    except Exception:
+        hook_ok = False
+    try:
+        dropin_ok = f"dropin_version={_LOGIND_DROPIN_VERSION}" in _LOGIND_DROPIN_PATH.read_text()
+    except Exception:
+        dropin_ok = False
+    return hook_ok and dropin_ok
+
+
+def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, str]:
+    """Ecrit le hook systemd-sleep et le drop-in logind (capot => hibernate),
+    puis recharge systemd-logind. A appeler alors que ce process est deja
+    root (install.sh, ou apres elevation sudo depuis l'app)."""
     try:
         _SLEEP_HOOK_PATH.write_text(_sleep_hook_content(home or Path.home()))
         _SLEEP_HOOK_PATH.chmod(0o755)
+        _LOGIND_DROPIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LOGIND_DROPIN_PATH.write_text(_logind_dropin_content())
+        _LOGIND_DROPIN_PATH.chmod(0o644)
+        subprocess.run(["systemctl", "restart", "systemd-logind"], timeout=15, check=False)
         return True, ""
     except Exception as e:
         return False, str(e)
 
 
-def _ensure_sleep_hook(stdscr) -> bool:
-    """S'assure que le hook systemd-sleep est present et a jour. Si absent
-    (ex: mise a jour depuis une ancienne version installee sans le hook),
-    propose une elevation sudo ponctuelle pour l'installer — permet aux
-    installations existantes d'obtenir la fonctionnalite sans relancer
-    install.sh."""
-    if _sleep_hook_up_to_date():
+def _ensure_poweroff_system(stdscr) -> bool:
+    """S'assure que le hook systemd-sleep et le drop-in logind (capot =>
+    hibernate) sont presents et a jour. Si absents (ex: mise a jour depuis
+    une ancienne version installee sans eux), propose une elevation sudo
+    ponctuelle pour les installer — permet aux installations existantes
+    d'obtenir la fonctionnalite sans relancer install.sh."""
+    if _system_setup_up_to_date():
         return True
-    if not confirm(stdscr, "Extinction apres veille prolongee (capot ferme) : "
-                            "installer le module systeme requis "
+    if not confirm(stdscr, "Extinction apres veille prolongee : le capot fermera "
+                            "desormais en hibernation (pas juste en veille) pour "
+                            "que le reveil programme fonctionne. Installer "
                             "(mot de passe administrateur) ?"):
         return False
+    if not _hibernate_swap_ok():
+        if not confirm(stdscr, "Attention : le swap semble insuffisant pour "
+                                "hiberner (< taille de la RAM). Continuer quand meme ?"):
+            return False
 
     home = Path.home()
-    tmp = Path("/tmp/distracfreewrite_sleep_hook")
-    tmp.write_text(_sleep_hook_content(home))
-    tmp.chmod(0o755)
+    script = Path(__file__).resolve()
 
     curses.endwin()
     try:
         print("\nMot de passe administrateur necessaire pour installer "
               "l'extinction automatique apres veille prolongee.\n")
-        r = subprocess.run(["sudo", "install", "-o", "root", "-g", "root", "-m", "755",
-                            str(tmp), str(_SLEEP_HOOK_PATH)])
+        r = subprocess.run(["sudo", sys.executable, str(script),
+                            "--install-poweroff-system", str(home)])
         ok = (r.returncode == 0)
     except Exception:
         ok = False
     finally:
-        tmp.unlink(missing_ok=True)
         stdscr.refresh()
 
     if not ok:
@@ -2746,10 +2802,11 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--install-sleep-hook":
-        # Appele par install.sh, deja root : ecriture directe, sans sudo.
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-poweroff-system":
+        # Appele par install.sh (deja root) ou par _ensure_poweroff_system
+        # via sudo : ecriture directe des fichiers systeme.
         _home = Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home()
-        _ok, _err = _install_sleep_hook_as_root(_home)
+        _ok, _err = _install_poweroff_system_as_root(_home)
         if not _ok:
             print(f"Erreur : {_err}", file=sys.stderr)
             sys.exit(1)

@@ -115,13 +115,22 @@ info "Dossiers ~/Projets et ~/.config/distracfreewrite créés"
 #
 # Le réglage "Extinction auto après veille" des paramètres de l'app ne peut
 # rien faire pendant que la machine est suspendue (le processus est gelé).
-# Ce hook systemd-sleep (contenu défini dans main.py, seule source de vérité)
-# pose une alarme RTC matérielle juste avant la veille ; si la machine n'a
-# pas été réveillée par l'utilisateur avant l'échéance, elle s'éteint
-# complètement au réveil au lieu de rester en veille indéfiniment.
+# Sur la plupart des portables, le firmware ne peut réveiller la machine par
+# alarme RTC que depuis l'hibernation (S4), pas depuis la simple veille RAM
+# (S3) — on force donc le capot fermé à hiberner (drop-in logind) et on pose
+# l'alarme RTC juste avant (hook systemd-sleep), pour un réveil fiable qui
+# éteint la machine si l'échéance est dépassée. Contenu défini dans main.py,
+# seule source de vérité.
 
-python3 "$INSTALL_DIR/main.py" --install-sleep-hook "$REAL_HOME"
-info "Extinction après veille prolongée configurée (hook systemd-sleep)"
+MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+SWAP_KB=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
+if [ "${SWAP_KB:-0}" -lt "${MEM_KB:-1}" ]; then
+    warn "Swap insuffisant pour l'hibernation (< taille de la RAM) : le capot"
+    warn "fermé risque de ne pas hiberner correctement."
+fi
+
+python3 "$INSTALL_DIR/main.py" --install-poweroff-system "$REAL_HOME"
+info "Extinction après veille prolongée configurée (capot => hibernation + alarme RTC)"
 
 # ── démarrage automatique ─────────────────────────────────────────────────────
 
