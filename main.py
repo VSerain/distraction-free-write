@@ -2621,18 +2621,30 @@ def _check_auto_poweroff(stdscr):
 #
 # Pendant une veille (suspend S3), ce process est gele : il ne peut ni
 # compter le temps ni agir. On pose donc une alarme RTC materielle juste
-# avant la mise en veille pour reveiller la machine et l'eteindre au bout
-# de X minutes — MAIS sur beaucoup de portables, le firmware ne sait
-# reveiller la machine par RTC que depuis l'hibernation (S4), jamais depuis
-# la simple veille RAM (S3) : `dmesg | grep rtc_cmos` affiche alors
-# "RTC can wake from S4". Dans ce cas l'alarme posee avant un S3 est
-# silencieusement ignoree ; la machine ne s'eteint qu'au reveil manuel
-# suivant, une fois la veille deja ecoulee.
+# avant la mise en veille : SI le firmware sait reveiller la machine par
+# RTC depuis S3, elle se reveille et s'eteint toute seule au bout de X
+# minutes, capot ferme.
 #
-# Pour que l'extinction se declenche vraiment pendant que le capot reste
-# ferme, on force donc la fermeture du capot a hiberner (S4) plutot que de
-# suspendre (drop-in logind), ce qui rend le reveil RTC fiable en plus de
-# ramener la consommation batterie a ~0 des la fermeture du capot.
+# Sur beaucoup de portables (et confirme sur du materiel Apple via
+# `dmesg | grep rtc_cmos` -> "RTC can wake from S4" seulement), ce reveil
+# RTC ne fonctionne PAS depuis S3. On a essaye de forcer l'hibernation
+# (S4, reveil RTC fiable) a la fermeture du capot, mais sur ce meme
+# materiel Apple l'hibernation echoue systematiquement au reveil
+# ("Hibernate inconsistent memory map detected" / "Image mismatch:
+# architecture specific data" — le firmware EFI rapporte une carte
+# memoire legerement differente a chaque demarrage, ce qui fait echouer
+# la validation de securite du noyau et redemarre a froid en perdant la
+# session). C'est une limitation materiel/firmware, pas un bug logiciel :
+# ni S3 (pas de reveil RTC) ni S4 (echec de reprise) ne permettent un
+# reveil autonome fiable sur ce type de machine.
+#
+# On revient donc a la veille classique (S3, rapide et fiable) pour la
+# fermeture du capot. L'extinction reste garantie de maniere reactive :
+# le hook post-reveil verifie systematiquement, a CHAQUE reveil (que ce
+# soit le reveil RTC s'il fonctionne, ou simplement l'utilisateur qui
+# rouvre le capot), si le delai configure est depasse, et eteint
+# immediatement si c'est le cas — au lieu de laisser la machine en veille
+# indefiniment sans jamais nettoyer.
 #
 # Le hook relit "auto_poweroff_min" dans config.json a chaque veille : un
 # changement fait dans l'app est donc pris en compte des la prochaine mise
@@ -2641,7 +2653,7 @@ def _check_auto_poweroff(stdscr):
 _SLEEP_HOOK_PATH       = Path("/usr/lib/systemd/system-sleep/distracfreewrite-poweroff")
 _SLEEP_HOOK_VERSION    = 1   # a incrementer si le contenu du hook change
 _LOGIND_DROPIN_PATH    = Path("/etc/systemd/logind.conf.d/50-distracfreewrite-poweroff.conf")
-_LOGIND_DROPIN_VERSION = 1   # a incrementer si le contenu du drop-in change
+_LOGIND_DROPIN_VERSION = 2   # a incrementer si le contenu du drop-in change
 _POWEROFF_INSTALL_LOG  = Path.home() / ".config" / "distracfreewrite" / "poweroff_install.log"
 
 
@@ -2697,29 +2709,14 @@ def _logind_dropin_content() -> str:
 # Installe par DistracFreeWrite — ne pas editer a la main.
 # dropin_version={_LOGIND_DROPIN_VERSION}
 #
-# Le capot ferme hiberne (S4) au lieu de suspendre (S3) : sur la plupart
-# des portables, seule l'hibernation peut etre reveillee par une alarme
-# RTC, ce qui est necessaire pour que "Extinction auto apres veille"
-# fonctionne pendant que le capot reste ferme. Effet secondaire benefique :
-# consommation batterie ~0 des la fermeture du capot, meme sans minuteur.
-HandleLidSwitch=hibernate
-HandleLidSwitchExternalPower=hibernate
+# Veille classique (S3) a la fermeture du capot : rapide et fiable.
+# L'hibernation (S4) a ete testee mais echoue a la reprise sur certains
+# materiels (carte memoire firmware incoherente entre redemarrages) —
+# voir le commentaire au-dessus de _SLEEP_HOOK_PATH. L'extinction apres
+# le delai configure reste garantie de maniere reactive, au reveil.
+HandleLidSwitch=suspend
+HandleLidSwitchExternalPower=suspend
 """
-
-
-def _hibernate_swap_ok() -> bool:
-    """Verifie grossierement que le swap est suffisant pour hiberner
-    (approximation : swap >= RAM totale)."""
-    try:
-        info = Path("/proc/meminfo").read_text()
-        def _kb(label):
-            for line in info.splitlines():
-                if line.startswith(label):
-                    return int(line.split()[1])
-            return 0
-        return _kb("SwapTotal:") >= _kb("MemTotal:")
-    except Exception:
-        return False
 
 
 def _system_setup_up_to_date() -> bool:
@@ -2734,161 +2731,12 @@ def _system_setup_up_to_date() -> bool:
     return hook_ok and dropin_ok
 
 
-# ── reprise apres hibernation (resume=/resume_offset=) ───────────────────────
-#
-# Sans ces parametres noyau, une machine qui hiberne sur un fichier de swap
-# ne sait pas ou relire son image au demarrage suivant : elle redemarre a
-# froid (nouvelle session, tout est perdu) au lieu de reprendre exactement
-# ou elle en etait — ce qui, vu de l'utilisateur, ressemble a une extinction
-# immediate quel que soit le capot.
-
-def _detect_swap_resume_params() -> "tuple[str, int] | None":
-    """Retourne (UUID du peripherique, resume_offset) pour le swap actif
-    (fichier ou partition), ou None si indetectable (pas de swap actif,
-    outils manquants, etc)."""
-    try:
-        r = subprocess.run(["swapon", "--show=NAME,TYPE", "--noheadings"],
-                            capture_output=True, text=True, timeout=10)
-        rows = [l.split() for l in r.stdout.splitlines() if l.strip()]
-        if not rows:
-            return None
-        name, stype = rows[0][0], rows[0][1]
-    except Exception:
-        return None
-
-    try:
-        if stype == "partition":
-            r = subprocess.run(["blkid", "-s", "UUID", "-o", "value", name],
-                                capture_output=True, text=True, timeout=10)
-            uuid = r.stdout.strip()
-            return (uuid, 0) if uuid else None
-
-        if stype == "file":
-            r = subprocess.run(["df", "--output=source", name],
-                                capture_output=True, text=True, timeout=10)
-            rows = r.stdout.splitlines()
-            if len(rows) < 2:
-                return None
-            dev = rows[-1].strip()
-            r2 = subprocess.run(["blkid", "-s", "UUID", "-o", "value", dev],
-                                 capture_output=True, text=True, timeout=10)
-            uuid = r2.stdout.strip()
-            if not uuid:
-                return None
-            r3 = subprocess.run(["filefrag", "-v", name],
-                                 capture_output=True, text=True, timeout=15)
-            offset = None
-            for line in r3.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 4 and parts[0] == "0:":
-                    offset = int(parts[3].split("..")[0])
-                    break
-            return (uuid, offset) if offset is not None else None
-    except Exception:
-        return None
-    return None
-
-
-def _hibernate_resume_configured() -> "bool | None":
-    """True si le noyau actuellement demarre a deja les bons resume=/
-    resume_offset= pour le swap actif ; False si non ; None si indetectable
-    (dans ce cas on ne bloque pas dessus, on ne peut rien verifier)."""
-    params = _detect_swap_resume_params()
-    if params is None:
-        return None
-    uuid, offset = params
-    try:
-        cmdline = Path("/proc/cmdline").read_text()
-    except Exception:
-        return False
-    return f"resume=UUID={uuid}" in cmdline and f"resume_offset={offset}" in cmdline
-
-
-def _configure_hibernate_resume_as_root() -> tuple[bool, str]:
-    """Configure resume=/resume_offset= (initramfs-tools + GRUB) pour le
-    swap actif et regenere initramfs/grub. Necessite un redemarrage pour
-    prendre effet. A appeler en root. Retourne (ok, journal detaille) —
-    le journal est toujours rempli, meme en cas de succes, pour pouvoir
-    diagnostiquer depuis l'ecran Debug."""
-    log: list[str] = []
-
-    def _run(cmd, **kw):
-        r = subprocess.run(cmd, capture_output=True, text=True, **kw)
-        log.append(f"$ {' '.join(cmd)}  -> code {r.returncode}")
-        if r.stdout.strip():
-            log.append(r.stdout.strip()[-1500:])
-        if r.stderr.strip():
-            log.append(r.stderr.strip()[-1500:])
-        return r
-
-    if shutil.which("filefrag") is None or shutil.which("blkid") is None:
-        # Mise a jour in-app depuis une version anterieure a l'ajout de
-        # e2fsprogs dans install.sh : ces outils peuvent manquer. On est
-        # deja root ici, autant les installer plutot que d'echouer.
-        log.append("filefrag/blkid absents, installation de e2fsprogs/util-linux...")
-        _run(["apt-get", "install", "-y", "e2fsprogs", "util-linux"], timeout=120)
-    for tool in ("swapon", "blkid", "filefrag"):
-        if shutil.which(tool) is None:
-            log.append(f"outil manquant : {tool} (installation automatique echouee)")
-            return False, "\n".join(log)
-
-    try:
-        r = subprocess.run(["swapon", "--show=NAME,TYPE", "--noheadings"],
-                            capture_output=True, text=True, timeout=10)
-        log.append(f"swapon --show -> {r.stdout.strip() or '(vide)'}")
-        if not r.stdout.strip():
-            log.append("aucun swap actif : rien a configurer.")
-            return True, "\n".join(log)
-    except Exception as e:
-        log.append(f"erreur swapon : {e}")
-        return False, "\n".join(log)
-
-    params = _detect_swap_resume_params()
-    log.append(f"parametres detectes (uuid, resume_offset) : {params}")
-    if params is None:
-        log.append("parametres de swap indetectables (blkid/filefrag n'ont pas abouti)")
-        return False, "\n".join(log)
-    uuid, offset = params
-
-    try:
-        resume_conf = Path("/etc/initramfs-tools/conf.d/resume")
-        resume_conf.parent.mkdir(parents=True, exist_ok=True)
-        resume_conf.write_text(f"RESUME=UUID={uuid}\n")
-        log.append(f"ecrit {resume_conf} : RESUME=UUID={uuid}")
-
-        resume_params = f"resume=UUID={uuid} resume_offset={offset}"
-        grub_file = Path("/etc/default/grub")
-        text = grub_file.read_text() if grub_file.exists() else 'GRUB_CMDLINE_LINUX_DEFAULT=""\n'
-        pattern = re.compile(r'^GRUB_CMDLINE_LINUX_DEFAULT="([^"]*)"', re.MULTILINE)
-        m = pattern.search(text)
-        if m:
-            cleaned = re.sub(r'\bresume(_offset)?=\S+', '', m.group(1)).split()
-            new_value = " ".join(cleaned + [resume_params])
-            text = pattern.sub(f'GRUB_CMDLINE_LINUX_DEFAULT="{new_value}"', text, count=1)
-        else:
-            text += f'\nGRUB_CMDLINE_LINUX_DEFAULT="{resume_params}"\n'
-        grub_file.write_text(text)
-        log.append(f"ecrit {grub_file} avec {resume_params}")
-
-        r = _run(["update-initramfs", "-u", "-k", "all"], timeout=180)
-        r.check_returncode()
-        r = _run(["update-grub"], timeout=60)
-        r.check_returncode()
-        return True, "\n".join(log)
-    except subprocess.CalledProcessError as e:
-        log.append(f"echec de la commande {e.cmd} (code {e.returncode})")
-        return False, "\n".join(log)
-    except Exception as e:
-        log.append(f"erreur : {e}")
-        return False, "\n".join(log)
-
-
 def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, str]:
-    """Ecrit le hook systemd-sleep et le drop-in logind (capot => hibernate),
-    configure la reprise d'hibernation si necessaire, puis recharge
-    systemd-logind. A appeler alors que ce process est deja root (install.sh,
-    ou apres elevation sudo depuis l'app). Retourne (ok, journal detaille) —
-    le journal est toujours rempli, meme en cas de succes."""
+    """Ecrit le hook systemd-sleep et le drop-in logind (capot => veille),
+    puis recharge systemd-logind. A appeler alors que ce process est deja
+    root (install.sh, ou apres elevation sudo depuis l'app). Retourne
+    (ok, journal detaille) — le journal est toujours rempli, meme en cas
+    de succes."""
     log: list[str] = []
     try:
         _SLEEP_HOOK_PATH.write_text(_sleep_hook_content(home or Path.home()))
@@ -2903,14 +2751,6 @@ def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, 
         log.append(f"systemctl restart systemd-logind -> code {r.returncode}")
         if r.stderr.strip():
             log.append(r.stderr.strip())
-
-        resume_status = _hibernate_resume_configured()
-        log.append(f"reprise d'hibernation deja active avant cette execution : {resume_status}")
-        if resume_status is not True:
-            ok, report = _configure_hibernate_resume_as_root()
-            log.append(report)
-            if not ok:
-                return False, "\n".join(log)
         return True, "\n".join(log)
     except Exception as e:
         log.append(f"erreur : {e}")
@@ -2918,29 +2758,20 @@ def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, 
 
 
 def _ensure_poweroff_system(stdscr) -> bool:
-    """S'assure que le hook systemd-sleep, le drop-in logind (capot =>
-    hibernate) et la reprise d'hibernation (resume=) sont en place. Si
-    absents (ex: mise a jour depuis une ancienne version installee sans
-    eux), propose une elevation sudo ponctuelle pour les installer —
-    permet aux installations existantes d'obtenir la fonctionnalite sans
-    relancer install.sh."""
-    resume_status = _hibernate_resume_configured()
-    if _system_setup_up_to_date() and resume_status is True:
+    """S'assure que le hook systemd-sleep et le drop-in logind (capot =>
+    veille) sont presents et a jour. Si absents (ex: mise a jour depuis
+    une ancienne version installee sans eux), propose une elevation sudo
+    ponctuelle pour les installer — permet aux installations existantes
+    d'obtenir la fonctionnalite sans relancer install.sh."""
+    if _system_setup_up_to_date():
         return True
 
-    msg = ("Extinction apres veille prolongee : le capot fermera desormais "
-           "en hibernation (pas juste en veille) pour que le reveil "
-           "programme fonctionne.")
-    if resume_status is not True:
-        msg += (" Une configuration de reprise (resume=) va aussi etre "
-                "installee/verifiee : sans elle, l'hibernation redemarre a froid "
-                "au lieu de restaurer la session — un redemarrage sera requis.")
+    msg = ("Extinction apres veille prolongee : le capot fermera en veille "
+           "classique. Si la machine reste endormie plus longtemps que le "
+           "delai configure, elle s'eteindra au prochain reveil (reouverture "
+           "du capot).")
     if not confirm(stdscr, msg + " Installer (mot de passe administrateur) ?"):
         return False
-    if not _hibernate_swap_ok():
-        if not confirm(stdscr, "Attention : le swap semble insuffisant pour "
-                                "hiberner (< taille de la RAM). Continuer quand meme ?"):
-            return False
 
     home = Path.home()
     script = Path(__file__).resolve()
@@ -2974,19 +2805,6 @@ def _ensure_poweroff_system(stdscr) -> bool:
             "",
             "Detail : Debug > \"Dernier resultat d'installation\".",
         ])
-    elif resume_status is not True:
-        if confirm(stdscr, "Configuration de reprise installee/verifiee. Redemarrer "
-                            "maintenant pour l'activer ?"):
-            curses.endwin()
-            subprocess.run(["systemctl", "reboot"], check=False)
-        else:
-            _text_page(stdscr, "Redemarrage requis", [
-                "La reprise apres hibernation ne sera active qu'apres un",
-                "redemarrage.",
-                "",
-                "Sans cela, le capot ferme continuera a redemarrer a froid",
-                "au lieu de reprendre la session en cours.",
-            ])
     return ok
 
 

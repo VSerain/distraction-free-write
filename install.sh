@@ -54,8 +54,7 @@ apt-get install -y \
     git \
     network-manager \
     wireless-tools \
-    openssh-client \
-    e2fsprogs
+    openssh-client
 
 # Vérification Python 3.10+
 if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
@@ -116,22 +115,17 @@ info "Dossiers ~/Projets et ~/.config/distracfreewrite créés"
 #
 # Le réglage "Extinction auto après veille" des paramètres de l'app ne peut
 # rien faire pendant que la machine est suspendue (le processus est gelé).
-# Sur la plupart des portables, le firmware ne peut réveiller la machine par
-# alarme RTC que depuis l'hibernation (S4), pas depuis la simple veille RAM
-# (S3) — on force donc le capot fermé à hiberner (drop-in logind) et on pose
-# l'alarme RTC juste avant (hook systemd-sleep), pour un réveil fiable qui
-# éteint la machine si l'échéance est dépassée. Contenu défini dans main.py,
-# seule source de vérité.
-
-MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-SWAP_KB=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
-if [ "${SWAP_KB:-0}" -lt "${MEM_KB:-1}" ]; then
-    warn "Swap insuffisant pour l'hibernation (< taille de la RAM) : le capot"
-    warn "fermé risque de ne pas hiberner correctement."
-fi
+# Un hook systemd-sleep pose une alarme RTC juste avant la veille : si le
+# firmware sait réveiller la machine depuis S3, elle s'éteint toute seule
+# capot fermé. Sinon (cas fréquent, RTC ne réveille que depuis l'hibernation
+# — et l'hibernation elle-même s'est révélée peu fiable sur certains
+# matériels, ex. Apple, où le firmware rapporte une carte mémoire
+# incohérente entre redémarrages), l'extinction reste garantie de manière
+# réactive au prochain réveil manuel. Contenu défini dans main.py, seule
+# source de vérité.
 
 python3 "$INSTALL_DIR/main.py" --install-poweroff-system "$REAL_HOME"
-info "Extinction après veille prolongée configurée (capot => hibernation + alarme RTC)"
+info "Extinction après veille prolongée configurée (hook systemd-sleep + veille au capot)"
 
 # ── démarrage automatique ─────────────────────────────────────────────────────
 
