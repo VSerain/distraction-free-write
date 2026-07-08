@@ -2515,6 +2515,7 @@ def _debug_screen(stdscr):
         "Diagnostic extinction / veille",
         "Executer une commande shell",
         "Configurer l'URL d'envoi (webhook)",
+        "Dernier resultat d'installation (extinction/veille)",
     ]
     sel = 0
     while True:
@@ -2563,6 +2564,14 @@ def _debug_screen(stdscr):
                 if val is not None:
                     _settings["debug_webhook_url"] = val
                     _save_settings()
+            elif sel == 3:
+                try:
+                    content = _POWEROFF_INSTALL_LOG.read_text()
+                    lines = content.splitlines() or ["(journal vide)"]
+                except Exception:
+                    lines = ["Aucune installation n'a encore ete tentee.",
+                              f"({_POWEROFF_INSTALL_LOG} absent)"]
+                _debug_result_page(stdscr, "Dernier resultat d'installation", lines)
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             return
 
@@ -2618,6 +2627,16 @@ _SLEEP_HOOK_PATH       = Path("/usr/lib/systemd/system-sleep/distracfreewrite-po
 _SLEEP_HOOK_VERSION    = 1   # a incrementer si le contenu du hook change
 _LOGIND_DROPIN_PATH    = Path("/etc/systemd/logind.conf.d/50-distracfreewrite-poweroff.conf")
 _LOGIND_DROPIN_VERSION = 1   # a incrementer si le contenu du drop-in change
+_POWEROFF_INSTALL_LOG  = Path.home() / ".config" / "distracfreewrite" / "poweroff_install.log"
+
+
+def _save_poweroff_install_log(ok: bool, report: str):
+    try:
+        _POWEROFF_INSTALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        header = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] resultat : {'OK' if ok else 'ECHEC'}\n"
+        _POWEROFF_INSTALL_LOG.write_text(header + report)
+    except Exception:
+        pass
 
 
 def _sleep_hook_content(home: Path) -> str:
@@ -2773,34 +2792,54 @@ def _hibernate_resume_configured() -> "bool | None":
 def _configure_hibernate_resume_as_root() -> tuple[bool, str]:
     """Configure resume=/resume_offset= (initramfs-tools + GRUB) pour le
     swap actif et regenere initramfs/grub. Necessite un redemarrage pour
-    prendre effet. A appeler en root."""
+    prendre effet. A appeler en root. Retourne (ok, journal detaille) —
+    le journal est toujours rempli, meme en cas de succes, pour pouvoir
+    diagnostiquer depuis l'ecran Debug."""
+    log: list[str] = []
+
+    def _run(cmd, **kw):
+        r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+        log.append(f"$ {' '.join(cmd)}  -> code {r.returncode}")
+        if r.stdout.strip():
+            log.append(r.stdout.strip()[-1500:])
+        if r.stderr.strip():
+            log.append(r.stderr.strip()[-1500:])
+        return r
+
     if shutil.which("filefrag") is None or shutil.which("blkid") is None:
         # Mise a jour in-app depuis une version anterieure a l'ajout de
         # e2fsprogs dans install.sh : ces outils peuvent manquer. On est
         # deja root ici, autant les installer plutot que d'echouer.
-        subprocess.run(["apt-get", "install", "-y", "e2fsprogs", "util-linux"],
-                        capture_output=True, timeout=120, check=False)
+        log.append("filefrag/blkid absents, installation de e2fsprogs/util-linux...")
+        _run(["apt-get", "install", "-y", "e2fsprogs", "util-linux"], timeout=120)
     for tool in ("swapon", "blkid", "filefrag"):
         if shutil.which(tool) is None:
-            return False, f"outil manquant : {tool} (installation automatique echouee)"
+            log.append(f"outil manquant : {tool} (installation automatique echouee)")
+            return False, "\n".join(log)
 
     try:
         r = subprocess.run(["swapon", "--show=NAME,TYPE", "--noheadings"],
                             capture_output=True, text=True, timeout=10)
+        log.append(f"swapon --show -> {r.stdout.strip() or '(vide)'}")
         if not r.stdout.strip():
-            return True, ""   # pas de swap actif : rien a configurer
+            log.append("aucun swap actif : rien a configurer.")
+            return True, "\n".join(log)
     except Exception as e:
-        return False, str(e)
+        log.append(f"erreur swapon : {e}")
+        return False, "\n".join(log)
 
     params = _detect_swap_resume_params()
+    log.append(f"parametres detectes (uuid, resume_offset) : {params}")
     if params is None:
-        return False, "parametres de swap indetectables (blkid/filefrag n'ont pas abouti)"
+        log.append("parametres de swap indetectables (blkid/filefrag n'ont pas abouti)")
+        return False, "\n".join(log)
     uuid, offset = params
 
     try:
         resume_conf = Path("/etc/initramfs-tools/conf.d/resume")
         resume_conf.parent.mkdir(parents=True, exist_ok=True)
         resume_conf.write_text(f"RESUME=UUID={uuid}\n")
+        log.append(f"ecrit {resume_conf} : RESUME=UUID={uuid}")
 
         resume_params = f"resume=UUID={uuid} resume_offset={offset}"
         grub_file = Path("/etc/default/grub")
@@ -2814,36 +2853,53 @@ def _configure_hibernate_resume_as_root() -> tuple[bool, str]:
         else:
             text += f'\nGRUB_CMDLINE_LINUX_DEFAULT="{resume_params}"\n'
         grub_file.write_text(text)
+        log.append(f"ecrit {grub_file} avec {resume_params}")
 
-        subprocess.run(["update-initramfs", "-u", "-k", "all"], timeout=180, check=True)
-        subprocess.run(["update-grub"], timeout=60, check=True)
-        return True, ""
+        r = _run(["update-initramfs", "-u", "-k", "all"], timeout=180)
+        r.check_returncode()
+        r = _run(["update-grub"], timeout=60)
+        r.check_returncode()
+        return True, "\n".join(log)
     except subprocess.CalledProcessError as e:
-        return False, f"echec de la commande {e.cmd} (code {e.returncode})"
+        log.append(f"echec de la commande {e.cmd} (code {e.returncode})")
+        return False, "\n".join(log)
     except Exception as e:
-        return False, str(e)
+        log.append(f"erreur : {e}")
+        return False, "\n".join(log)
 
 
 def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, str]:
     """Ecrit le hook systemd-sleep et le drop-in logind (capot => hibernate),
     configure la reprise d'hibernation si necessaire, puis recharge
     systemd-logind. A appeler alors que ce process est deja root (install.sh,
-    ou apres elevation sudo depuis l'app)."""
+    ou apres elevation sudo depuis l'app). Retourne (ok, journal detaille) —
+    le journal est toujours rempli, meme en cas de succes."""
+    log: list[str] = []
     try:
         _SLEEP_HOOK_PATH.write_text(_sleep_hook_content(home or Path.home()))
         _SLEEP_HOOK_PATH.chmod(0o755)
+        log.append(f"hook ecrit : {_SLEEP_HOOK_PATH}")
         _LOGIND_DROPIN_PATH.parent.mkdir(parents=True, exist_ok=True)
         _LOGIND_DROPIN_PATH.write_text(_logind_dropin_content())
         _LOGIND_DROPIN_PATH.chmod(0o644)
-        subprocess.run(["systemctl", "restart", "systemd-logind"], timeout=15, check=False)
+        log.append(f"drop-in ecrit : {_LOGIND_DROPIN_PATH}")
+        r = subprocess.run(["systemctl", "restart", "systemd-logind"],
+                            capture_output=True, text=True, timeout=15, check=False)
+        log.append(f"systemctl restart systemd-logind -> code {r.returncode}")
+        if r.stderr.strip():
+            log.append(r.stderr.strip())
 
-        if _hibernate_resume_configured() is not True:
-            ok, err = _configure_hibernate_resume_as_root()
+        resume_status = _hibernate_resume_configured()
+        log.append(f"reprise d'hibernation deja active avant cette execution : {resume_status}")
+        if resume_status is not True:
+            ok, report = _configure_hibernate_resume_as_root()
+            log.append(report)
             if not ok:
-                return False, f"hook et drop-in installes, mais reprise d'hibernation echouee : {err}"
-        return True, ""
+                return False, "\n".join(log)
+        return True, "\n".join(log)
     except Exception as e:
-        return False, str(e)
+        log.append(f"erreur : {e}")
+        return False, "\n".join(log)
 
 
 def _ensure_poweroff_system(stdscr) -> bool:
@@ -2878,13 +2934,20 @@ def _ensure_poweroff_system(stdscr) -> bool:
     try:
         print("\nMot de passe administrateur necessaire pour installer "
               "l'extinction automatique apres veille prolongee.\n")
+        # sudo lit le mot de passe sur /dev/tty directement : capturer
+        # stdout/stderr ici n'empeche pas le prompt de s'afficher.
         r = subprocess.run(["sudo", sys.executable, str(script),
-                            "--install-poweroff-system", str(home)])
+                            "--install-poweroff-system", str(home)],
+                            capture_output=True, text=True)
         ok = (r.returncode == 0)
-    except Exception:
+        report = (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
         ok = False
+        report = str(e)
     finally:
         stdscr.refresh()
+
+    _save_poweroff_install_log(ok, report)
 
     if not ok:
         _text_page(stdscr, "Installation incomplete", [
@@ -2893,6 +2956,8 @@ def _ensure_poweroff_system(stdscr) -> bool:
             "",
             "Le reglage reste actif pour l'inactivite simple (app ouverte),",
             "mais pas pour la mise en veille (capot ferme).",
+            "",
+            "Detail : Debug > \"Dernier resultat d'installation\".",
         ])
     elif resume_status is not True:
         if confirm(stdscr, "Configuration de reprise installee/verifiee. Redemarrer "
@@ -3156,11 +3221,9 @@ if __name__ == "__main__":
         # Appele par install.sh (deja root) ou par _ensure_poweroff_system
         # via sudo : ecriture directe des fichiers systeme.
         _home = Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home()
-        _ok, _err = _install_poweroff_system_as_root(_home)
-        if not _ok:
-            print(f"Erreur : {_err}", file=sys.stderr)
-            sys.exit(1)
-        sys.exit(0)
+        _ok, _report = _install_poweroff_system_as_root(_home)
+        print(_report)   # toujours affiche (succes ou echec) pour diagnostic
+        sys.exit(0 if _ok else 1)
 
     os.environ.setdefault("ESCDELAY", "25")   # ESC réactif sans attendre 1 s
     curses.wrapper(main)
