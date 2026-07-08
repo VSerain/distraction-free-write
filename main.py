@@ -2407,10 +2407,100 @@ def _run_shell(cmd: str, timeout: int = 30) -> list[str]:
         return [f"Erreur : {e}"]
 
 
+def _send_to_webhook(url: str, text: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            ["curl", "-fsS", "-X", "POST",
+             "-H", "Content-Type: text/plain; charset=utf-8",
+             "--data-binary", "@-", url],
+            input=text, capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            return False, (r.stderr or "erreur curl").strip()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _send_debug_result(stdscr, text: str):
+    """Envoie le texte vers l'URL webhook configuree (ex: webhook.site),
+    pour lire le resultat depuis un navigateur au lieu de recopier le
+    terminal a la main."""
+    url = _settings.get("debug_webhook_url", "")
+    if not url:
+        url = get_input(stdscr, "URL webhook (cree-en une sur webhook.site puis colle l'URL ici)")
+        if not url:
+            return
+        _settings["debug_webhook_url"] = url
+        _save_settings()
+
+    wifi_managed = _settings.get("wifi_off", False)
+    if wifi_managed:
+        _wifi_set_radio(True)
+        _wait_wifi_up(stdscr)
+    if not _is_network_connected():
+        _flash(stdscr, "WiFi non connecte — redirection vers la connexion...", 1.2)
+        _wifi_connect_screen(stdscr)
+    if not _is_network_connected():
+        if wifi_managed:
+            _wifi_set_radio(False)
+        _flash(stdscr, "Envoi impossible : pas de connexion reseau.")
+        return
+
+    _loader(stdscr, "Envoi en cours...")
+    ok, err = _send_to_webhook(url, text)
+    if wifi_managed:
+        _wifi_set_radio(False)
+
+    if ok:
+        _flash(stdscr, "Resultat envoye.")
+    else:
+        _text_page(stdscr, "Erreur d'envoi", [err or "Erreur inconnue."])
+
+
+def _debug_result_page(stdscr, title: str, lines: list[str]):
+    """Comme _text_page, avec 's' pour envoyer le contenu au webhook configure."""
+    offset = 0
+    text = "\n".join(lines)
+    while True:
+        h, w = stdscr.getmaxyx()
+        content_h = h - 2
+        stdscr.erase()
+        topbar(stdscr, title)
+        visible = lines[offset:offset + content_h]
+        for i, line in enumerate(visible):
+            try:
+                stdscr.addstr(1 + i, 2, line[:w - 3])
+            except curses.error:
+                pass
+        if len(lines) > content_h:
+            bar = (f"  haut/bas PgUp PgDn  {offset + 1}-{min(offset + content_h, len(lines))}/{len(lines)}"
+                   f"   s Envoyer   <- Retour")
+        else:
+            bar = "  s Envoyer   <- Retour"
+        bottombar(stdscr, bar)
+        stdscr.refresh()
+
+        ch, code = next_key(stdscr)
+        if code == curses.KEY_UP:
+            offset = max(0, offset - 1)
+        elif code == curses.KEY_DOWN:
+            offset = min(max(0, len(lines) - content_h), offset + 1)
+        elif code == curses.KEY_PPAGE:
+            offset = max(0, offset - content_h)
+        elif code == curses.KEY_NPAGE:
+            offset = min(max(0, len(lines) - content_h), offset + content_h)
+        elif ch is not None and ch.lower() == "s":
+            _send_debug_result(stdscr, text)
+        elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
+            return
+
+
 def _debug_screen(stdscr):
     items = [
         "Diagnostic extinction / veille",
         "Executer une commande shell",
+        "Configurer l'URL d'envoi (webhook)",
     ]
     sel = 0
     while True:
@@ -2420,7 +2510,11 @@ def _debug_screen(stdscr):
         for i, label in enumerate(items):
             row = 2 + i
             is_sel = (sel == i)
-            line = f"  {'>' if is_sel else ' '}  {label}"
+            extra = ""
+            if i == 2:
+                url = _settings.get("debug_webhook_url", "")
+                extra = f"   ({url})" if url else "   (non definie)"
+            line = f"  {'>' if is_sel else ' '}  {label}{extra}"
             try:
                 if is_sel:
                     stdscr.attron(curses.A_REVERSE)
@@ -2442,13 +2536,19 @@ def _debug_screen(stdscr):
             if sel == 0:
                 _loader(stdscr, "Diagnostic en cours...")
                 lines = _run_shell(_DIAG_POWEROFF_CMD, timeout=20)
-                _text_page(stdscr, "Diagnostic extinction / veille", lines)
+                _debug_result_page(stdscr, "Diagnostic extinction / veille", lines)
             elif sel == 1:
                 cmd = get_input(stdscr, "Commande shell a executer")
                 if cmd:
                     _loader(stdscr, "Execution...")
                     lines = _run_shell(cmd)
-                    _text_page(stdscr, f"$ {cmd}", lines)
+                    _debug_result_page(stdscr, f"$ {cmd}", lines)
+            elif sel == 2:
+                current_url = _settings.get("debug_webhook_url", "")
+                val = get_input(stdscr, "URL webhook (ex: https://webhook.site/xxxx)", prefill=current_url)
+                if val is not None:
+                    _settings["debug_webhook_url"] = val
+                    _save_settings()
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             return
 
