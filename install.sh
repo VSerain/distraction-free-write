@@ -54,7 +54,8 @@ apt-get install -y \
     git \
     network-manager \
     wireless-tools \
-    openssh-client
+    openssh-client \
+    e2fsprogs
 
 # Vérification Python 3.10+
 if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
