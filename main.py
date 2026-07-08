@@ -2377,6 +2377,9 @@ _DIAG_POWEROFF_CMD = r"""
 echo "== journalctl (lid / hibernate / suspend / logind / poweroff) =="
 journalctl -b --no-pager | grep -iE 'lid|hibernat|suspend|logind|poweroff|shutdown' | tail -80
 echo
+echo "== journalctl noyau (PM / hibernation / ACPI / resume) =="
+journalctl -k -b --no-pager | grep -iE 'PM:|hibernat|resume|ACPI' | tail -80
+echo
 echo "== memoire / swap =="
 free -h
 swapon --show
@@ -2516,6 +2519,7 @@ def _debug_screen(stdscr):
         "Executer une commande shell",
         "Configurer l'URL d'envoi (webhook)",
         "Dernier resultat d'installation (extinction/veille)",
+        "Forcer une hibernation maintenant (test, sans le capot)",
     ]
     sel = 0
     while True:
@@ -2572,6 +2576,17 @@ def _debug_screen(stdscr):
                     lines = ["Aucune installation n'a encore ete tentee.",
                               f"({_POWEROFF_INSTALL_LOG} absent)"]
                 _debug_result_page(stdscr, "Dernier resultat d'installation", lines)
+            elif sel == 4:
+                if confirm(stdscr, "Hiberner maintenant pour tester, sans passer par "
+                                    "le capot ? La machine va s'endormir tout de suite."):
+                    curses.endwin()
+                    for cmd in (["systemctl", "hibernate"], ["sudo", "systemctl", "hibernate"]):
+                        try:
+                            subprocess.run(cmd, timeout=10)
+                            break
+                        except Exception:
+                            continue
+                    stdscr.refresh()
         elif code == curses.KEY_LEFT or (ch is not None and ord(ch) == 27):
             return
 
