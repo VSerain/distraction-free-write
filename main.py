@@ -2386,6 +2386,16 @@ echo -n "cmdline actuel : "; grep -o 'resume[^ ]*' /proc/cmdline | tr '\n' ' '; 
 cat /etc/initramfs-tools/conf.d/resume 2>/dev/null || echo "(pas de config initramfs-tools/resume)"
 grep -o 'resume[^"]*' /etc/default/grub 2>/dev/null || echo "(pas de resume dans /etc/default/grub)"
 echo
+echo "== bootloader =="
+echo -n "update-grub    : "; which update-grub 2>&1 || echo "absent"
+echo -n "grub-mkconfig  : "; which grub-mkconfig 2>&1 || echo "absent"
+echo -n "/boot          : "; ls /boot/ 2>&1
+echo -n "/boot/efi      : "; ls /boot/efi 2>&1
+echo "efibootmgr :"; efibootmgr 2>&1
+echo "cmdline complet : $(cat /proc/cmdline)"
+echo "/etc/default/grub :"
+cat /etc/default/grub 2>&1
+echo
 echo "== drop-in logind =="
 cat /etc/systemd/logind.conf.d/50-distracfreewrite-poweroff.conf 2>/dev/null || echo "(absent)"
 echo
@@ -2764,9 +2774,27 @@ def _configure_hibernate_resume_as_root() -> tuple[bool, str]:
     """Configure resume=/resume_offset= (initramfs-tools + GRUB) pour le
     swap actif et regenere initramfs/grub. Necessite un redemarrage pour
     prendre effet. A appeler en root."""
+    if shutil.which("filefrag") is None or shutil.which("blkid") is None:
+        # Mise a jour in-app depuis une version anterieure a l'ajout de
+        # e2fsprogs dans install.sh : ces outils peuvent manquer. On est
+        # deja root ici, autant les installer plutot que d'echouer.
+        subprocess.run(["apt-get", "install", "-y", "e2fsprogs", "util-linux"],
+                        capture_output=True, timeout=120, check=False)
+    for tool in ("swapon", "blkid", "filefrag"):
+        if shutil.which(tool) is None:
+            return False, f"outil manquant : {tool} (installation automatique echouee)"
+
+    try:
+        r = subprocess.run(["swapon", "--show=NAME,TYPE", "--noheadings"],
+                            capture_output=True, text=True, timeout=10)
+        if not r.stdout.strip():
+            return True, ""   # pas de swap actif : rien a configurer
+    except Exception as e:
+        return False, str(e)
+
     params = _detect_swap_resume_params()
     if params is None:
-        return False, "swap actif indetectable (swapon --show vide, ou outils manquants)"
+        return False, "parametres de swap indetectables (blkid/filefrag n'ont pas abouti)"
     uuid, offset = params
 
     try:
@@ -2809,7 +2837,7 @@ def _install_poweroff_system_as_root(home: "Path | None" = None) -> tuple[bool, 
         _LOGIND_DROPIN_PATH.chmod(0o644)
         subprocess.run(["systemctl", "restart", "systemd-logind"], timeout=15, check=False)
 
-        if _hibernate_resume_configured() is False:
+        if _hibernate_resume_configured() is not True:
             ok, err = _configure_hibernate_resume_as_root()
             if not ok:
                 return False, f"hook et drop-in installes, mais reprise d'hibernation echouee : {err}"
@@ -2826,16 +2854,16 @@ def _ensure_poweroff_system(stdscr) -> bool:
     permet aux installations existantes d'obtenir la fonctionnalite sans
     relancer install.sh."""
     resume_status = _hibernate_resume_configured()
-    if _system_setup_up_to_date() and resume_status is not False:
+    if _system_setup_up_to_date() and resume_status is True:
         return True
 
     msg = ("Extinction apres veille prolongee : le capot fermera desormais "
            "en hibernation (pas juste en veille) pour que le reveil "
            "programme fonctionne.")
-    if resume_status is False:
+    if resume_status is not True:
         msg += (" Une configuration de reprise (resume=) va aussi etre "
-                "installee : sans elle, l'hibernation redemarre a froid au "
-                "lieu de restaurer la session — un redemarrage sera requis.")
+                "installee/verifiee : sans elle, l'hibernation redemarre a froid "
+                "au lieu de restaurer la session — un redemarrage sera requis.")
     if not confirm(stdscr, msg + " Installer (mot de passe administrateur) ?"):
         return False
     if not _hibernate_swap_ok():
@@ -2866,9 +2894,9 @@ def _ensure_poweroff_system(stdscr) -> bool:
             "Le reglage reste actif pour l'inactivite simple (app ouverte),",
             "mais pas pour la mise en veille (capot ferme).",
         ])
-    elif resume_status is False:
-        if confirm(stdscr, "Configuration de reprise installee. Redemarrer maintenant "
-                            "pour l'activer ?"):
+    elif resume_status is not True:
+        if confirm(stdscr, "Configuration de reprise installee/verifiee. Redemarrer "
+                            "maintenant pour l'activer ?"):
             curses.endwin()
             subprocess.run(["systemctl", "reboot"], check=False)
         else:
